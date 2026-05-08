@@ -3,6 +3,7 @@ import { useMemo } from "react";
 import { useDraftStore } from "../../stores/draftStore";
 import type { PoolSortMode } from "../../stores/draftStore";
 import type { DraftCardInstance } from "../../adapter/draft-adapter";
+import type { CardHoverInfo } from "../card/CardPreview";
 
 // ── Sorting helpers ─────────────────────────────────────────────────────
 // These are display-layer grouping of engine-provided enriched fields
@@ -175,7 +176,7 @@ const SORT_MODES: Array<{ mode: PoolSortMode; label: string }> = [
 // ── Component ───────────────────────────────────────────────────────────
 
 interface PoolPanelProps {
-  onCardHover?: (name: string | null) => void;
+  onCardHover?: (info: CardHoverInfo | null) => void;
 }
 
 export function PoolPanel({ onCardHover }: PoolPanelProps = {}) {
@@ -239,7 +240,7 @@ export function PoolPanel({ onCardHover }: PoolPanelProps = {}) {
                   {group.cards.map(({ card, count }) => (
                     <div
                       key={card.instance_id}
-                      onMouseEnter={onCardHover ? () => onCardHover(card.name) : undefined}
+                      onMouseEnter={onCardHover ? () => onCardHover({ name: card.name, sourcePrinting: { setCode: card.set_code, collectorNumber: card.collector_number } }) : undefined}
                       onMouseLeave={onCardHover ? () => onCardHover(null) : undefined}
                       className="flex items-center gap-2 rounded-[10px] px-2 py-1 text-xs transition-colors hover:bg-white/5"
                     >

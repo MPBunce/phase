@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 
 import type { GameObject } from "../../adapter/types.ts";
 import { useCardImage } from "../../hooks/useCardImage.ts";
+import type { SourcePrinting } from "../../hooks/useCardImage.ts";
 import { useIsMobile } from "../../hooks/useIsMobile.ts";
 import { useEngineCardData, useCardParseDetails, useCardRulings, type ParsedItem } from "../../hooks/useEngineCardData.ts";
 import type { CardRuling } from "../../services/engineRuntime.ts";
@@ -27,12 +28,18 @@ if (typeof window !== "undefined") {
   );
 }
 
+export interface CardHoverInfo {
+  name: string;
+  sourcePrinting?: SourcePrinting;
+}
+
 interface CardPreviewProps {
   cardName: string | null;
   backFaceName?: string | null;
   faceIndex?: number;
   position?: { x: number; y: number };
   scryfallId?: string;
+  sourcePrinting?: SourcePrinting;
 }
 
 export function CardPreview({
@@ -41,6 +48,7 @@ export function CardPreview({
   faceIndex,
   position,
   scryfallId,
+  sourcePrinting,
 }: CardPreviewProps) {
   if (!cardName) return null;
 
@@ -51,6 +59,7 @@ export function CardPreview({
       faceIndex={faceIndex}
       position={position}
       scryfallId={scryfallId}
+      sourcePrinting={sourcePrinting}
     />
   );
 }
@@ -61,12 +70,14 @@ function CardPreviewInner({
   faceIndex,
   position,
   scryfallId,
+  sourcePrinting,
 }: {
   cardName: string;
   backFaceName: string | null;
   faceIndex?: number;
   position?: { x: number; y: number };
   scryfallId?: string;
+  sourcePrinting?: SourcePrinting;
 }) {
   const inspectedObjectId = useUiStore((s) => s.inspectedObjectId);
   const dismissPreview = useUiStore((s) => s.dismissPreview);
@@ -111,6 +122,7 @@ function CardPreviewInner({
     oracleId: obj?.printed_ref?.oracle_id,
     faceName: obj?.printed_ref?.face_name,
     scryfallId,
+    sourcePrinting,
   });
   const classLevel = obj?.class_level;
   const previewRef = useRef<HTMLDivElement | null>(null);
@@ -244,6 +256,7 @@ function CardPreviewInner({
         faceIndex={defaultFaceIndex}
         obj={obj}
         onDismiss={dismissPreview}
+        sourcePrinting={sourcePrinting}
       />
     );
   }
@@ -294,18 +307,21 @@ function MobilePreviewOverlay({
   faceIndex,
   obj,
   onDismiss,
+  sourcePrinting,
 }: {
   cardName: string;
   backFaceName: string | null;
   faceIndex?: number;
   obj: GameObject | null;
   onDismiss: () => void;
+  sourcePrinting?: SourcePrinting;
 }) {
   const { src } = useCardImage(cardName, {
     size: "normal",
     faceIndex,
     oracleId: obj?.printed_ref?.oracle_id,
     faceName: obj?.printed_ref?.face_name,
+    sourcePrinting,
   });
 
   // pointerdown (not click): the touch-release that opened this overlay fires

@@ -3,6 +3,7 @@ import { useEffect } from "react";
 import { useCardImage } from "../../hooks/useCardImage";
 import { useDraftStore } from "../../stores/draftStore";
 import type { DraftCardInstance } from "../../adapter/draft-adapter";
+import type { CardHoverInfo } from "../card/CardPreview";
 
 // ── Card tile ───────────────────────────────────────────────────────────
 
@@ -11,7 +12,7 @@ interface PackCardProps {
   isSelected: boolean;
   onSelect: (instanceId: string) => void;
   onConfirm: () => void;
-  onHover: (name: string | null) => void;
+  onHover: (info: CardHoverInfo | null) => void;
 }
 
 function PackCard({
@@ -33,7 +34,7 @@ function PackCard({
           ? "z-10 scale-105 ring-2 ring-amber-400 shadow-lg shadow-amber-400/20"
           : "ring-1 ring-white/10 hover:scale-[1.02] hover:ring-white/20"
       }`}
-      onMouseEnter={() => onHover(card.name)}
+      onMouseEnter={() => onHover({ name: card.name, sourcePrinting: { setCode: card.set_code, collectorNumber: card.collector_number } })}
       onMouseLeave={() => onHover(null)}
     >
       <button
@@ -105,7 +106,7 @@ function groupByRarity(cards: DraftCardInstance[]) {
 // ── Main component ──────────────────────────────────────────────────────
 
 interface PackDisplayProps {
-  onCardHover: (name: string | null) => void;
+  onCardHover: (info: CardHoverInfo | null) => void;
 }
 
 export function PackDisplay({ onCardHover }: PackDisplayProps) {

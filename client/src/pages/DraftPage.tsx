@@ -3,6 +3,7 @@ import { useNavigate, useSearchParams } from "react-router";
 
 import { useDraftStore } from "../stores/draftStore";
 import { CardPreview } from "../components/card/CardPreview";
+import type { CardHoverInfo } from "../components/card/CardPreview";
 import { DraftIntro } from "../components/draft/DraftIntro";
 import { SetSelector } from "../components/draft/SetSelector";
 import { PackDisplay } from "../components/draft/PackDisplay";
@@ -225,7 +226,7 @@ export function DraftPage() {
   const reset = useDraftStore((s) => s.reset);
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
-  const [hoveredCardName, setHoveredCardName] = useState<string | null>(null);
+  const [hoveredCard, setHoveredCard] = useState<CardHoverInfo | null>(null);
   const [introDismissed, setIntroDismissed] = useState(false);
   const [resumeLoading, setResumeLoading] = useState(false);
 
@@ -285,7 +286,9 @@ export function DraftPage() {
   return (
     <div className="menu-scene relative flex min-h-screen flex-col overflow-hidden">
       <ScreenChrome onBack={() => navigate("/draft")} />
-      {phase === "drafting" && introDismissed && <CardPreview cardName={hoveredCardName} />}
+      {phase === "drafting" && introDismissed && (
+        <CardPreview cardName={hoveredCard?.name ?? null} sourcePrinting={hoveredCard?.sourcePrinting} />
+      )}
 
       <div className="relative z-10 mx-auto flex w-full max-w-6xl flex-col px-6 py-16">
         {resumeLoading && (
@@ -311,9 +314,9 @@ export function DraftPage() {
               <div className="mb-4">
                 <DraftProgress />
               </div>
-              <PackDisplay onCardHover={setHoveredCardName} />
+              <PackDisplay onCardHover={setHoveredCard} />
             </div>
-            <PoolPanel onCardHover={setHoveredCardName} />
+            <PoolPanel onCardHover={setHoveredCard} />
           </div>
         )}
 

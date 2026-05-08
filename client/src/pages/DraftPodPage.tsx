@@ -12,6 +12,7 @@ import { useCallback, useEffect, useState } from "react";
 import { useNavigate } from "react-router";
 
 import { CardPreview } from "../components/card/CardPreview";
+import type { CardHoverInfo } from "../components/card/CardPreview";
 import { ScreenChrome } from "../components/chrome/ScreenChrome";
 import { DraftIntro } from "../components/draft/DraftIntro";
 import { DraftPodLobby } from "../components/draft/DraftPodLobby";
@@ -508,7 +509,7 @@ function BetweenGamesView() {
 }
 
 function DraftingPhaseContent() {
-  const [hoveredCardName, setHoveredCardName] = useState<string | null>(null);
+  const [hoveredCard, setHoveredCard] = useState<CardHoverInfo | null>(null);
   const [introDismissed, setIntroDismissed] = useState(false);
   const podSize = useDraftPodStore((s) => s.config.podSize);
 
@@ -523,11 +524,11 @@ function DraftingPhaseContent() {
           <SeatStatusRing />
           <PickTimer />
           <DraftProgress />
-          <PackDisplay onCardHover={setHoveredCardName} />
+          <PackDisplay onCardHover={setHoveredCard} />
         </div>
-        <PoolPanel onCardHover={setHoveredCardName} />
+        <PoolPanel onCardHover={setHoveredCard} />
       </div>
-      <CardPreview cardName={hoveredCardName} />
+      <CardPreview cardName={hoveredCard?.name ?? null} sourcePrinting={hoveredCard?.sourcePrinting} />
     </>
   );
 }
