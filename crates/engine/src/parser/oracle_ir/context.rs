@@ -49,6 +49,11 @@ impl ParseContext {
 
     /// Push a diagnostic (replaces oracle_warnings::push_diagnostic).
     pub fn push_diagnostic(&mut self, d: OracleDiagnostic) {
+        if matches!(d, OracleDiagnostic::TargetFallback { .. })
+            && self.diagnostics.iter().any(|existing| existing == &d)
+        {
+            return;
+        }
         self.diagnostics.push(d);
     }
 
@@ -65,5 +70,43 @@ impl ParseContext {
         let result = f(self);
         self.relative_player_scope = prev;
         result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn target_fallback_diagnostics_are_idempotent() {
+        let mut ctx = ParseContext::default();
+        let diagnostic = OracleDiagnostic::TargetFallback {
+            context: "search-filter-suffix unmatched".into(),
+            text: "with an unsupported clause".into(),
+            line_index: 0,
+        };
+
+        ctx.push_diagnostic(diagnostic.clone());
+        ctx.push_diagnostic(diagnostic);
+
+        assert_eq!(ctx.diagnostics.len(), 1);
+    }
+
+    #[test]
+    fn distinct_target_fallback_diagnostics_are_preserved() {
+        let mut ctx = ParseContext::default();
+
+        ctx.push_diagnostic(OracleDiagnostic::TargetFallback {
+            context: "search-filter-suffix unmatched".into(),
+            text: "first clause".into(),
+            line_index: 0,
+        });
+        ctx.push_diagnostic(OracleDiagnostic::TargetFallback {
+            context: "search-filter-suffix unmatched".into(),
+            text: "second clause".into(),
+            line_index: 0,
+        });
+
+        assert_eq!(ctx.diagnostics.len(), 2);
     }
 }
