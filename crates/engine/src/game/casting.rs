@@ -3333,19 +3333,16 @@ fn continue_with_prepared(
             });
         }
 
-        let mut r = ResolvedAbility::new(
-            *ability_def.effect.clone(),
-            Vec::new(),
-            prepared.object_id,
-            player,
-        );
-        if let Some(sub) = &ability_def.sub_ability {
-            r = r.sub_ability(build_resolved_from_def(sub, prepared.object_id, player));
-        }
-        if let Some(c) = ability_def.condition.clone() {
-            r = r.condition(c);
-        }
-        r
+        // CR 608.2 + CR 109.5: Use the canonical builder so the spell's full
+        // typed ability surface — `player_scope` (CR 608.2: "Each opponent X"),
+        // `kind`, `optional`, `optional_for`, `multi_target`, `unless_pay`,
+        // `target_choice_timing`, `repeat_for`, `description`, `forward_result`,
+        // `optional_targeting`, `target_selection_mode`, and the `else_ability`
+        // branch — is preserved end-to-end into resolution. Hand-rolling a
+        // partial copy here previously stripped `player_scope` from cast spells
+        // (issue #310: Maddening Cacophony, Fractured Sanity), causing
+        // `Each opponent mills N cards.` to mill the controller instead.
+        build_resolved_from_def(ability_def, prepared.object_id, player)
     } else {
         // Aura placeholder — will carry targets from Enchant keyword targeting
         ResolvedAbility::new(
@@ -4978,17 +4975,11 @@ pub fn can_activate_ability_now(
         return modal.mode_count > 0;
     }
 
-    let resolved = {
-        let mut ability =
-            ResolvedAbility::new(*ability_def.effect.clone(), Vec::new(), source_id, player);
-        if let Some(sub) = &ability_def.sub_ability {
-            ability = ability.sub_ability(build_resolved_from_def(sub, source_id, player));
-        }
-        if let Some(condition) = ability_def.condition.clone() {
-            ability = ability.condition(condition);
-        }
-        ability
-    };
+    // CR 608.2 + CR 109.5: Build via the canonical helper so target-slot
+    // collection sees `multi_target`, `target_choice_timing`, `player_scope`,
+    // and the rest of the ability surface that affects legality. Mirrors the
+    // spell-cast path fix from issue #310.
+    let resolved = build_resolved_from_def(&ability_def, source_id, player);
 
     let mut simulated = state.clone();
     if simulated.layers_dirty {
@@ -5122,20 +5113,15 @@ pub fn handle_activate_ability(
         });
     }
 
-    let resolved = {
-        let mut r =
-            ResolvedAbility::new(*ability_def.effect.clone(), Vec::new(), source_id, player);
-        if let Some(sub) = &ability_def.sub_ability {
-            r = r.sub_ability(build_resolved_from_def(sub, source_id, player));
-        }
-        if let Some(c) = ability_def.condition.clone() {
-            r = r.condition(c);
-        }
-        // CR 603.4: Stamp the printed-ability index for per-turn resolution tracking
-        // before any branch path that pushes this ability onto the stack.
-        r.ability_index = Some(ability_index);
-        r
-    };
+    // CR 608.2 + CR 109.5: Build via the canonical helper so the activated
+    // ability's `player_scope`, `kind`, `optional`, `optional_for`,
+    // `multi_target`, `target_choice_timing`, `unless_pay`, `description`,
+    // `else_ability`, and other typed fields survive into resolution
+    // (issue #310 — same root cause as the spell-cast path).
+    let mut resolved = build_resolved_from_def(&ability_def, source_id, player);
+    // CR 603.4: Stamp the printed-ability index for per-turn resolution tracking
+    // before any branch path that pushes this ability onto the stack.
+    resolved.ability_index = Some(ability_index);
 
     // CR 118.3: Pre-check for non-self sacrifice costs — must detour to WaitingFor
     // before any cost payment, regardless of whether targets were auto-selected.
@@ -17106,6 +17092,110 @@ mod tests {
             host_obj.toughness,
             Some(5),
             "CR 702.103b: enchanted creature's toughness should be buffed by bestow Aura static"
+        );
+    }
+
+    /// Issue #310 (Maddening Cacophony / Fractured Sanity): the spell-cast
+    /// path must propagate `player_scope` from the printed `AbilityDefinition`
+    /// into the `ResolvedAbility` pushed onto the stack. Prior to the fix,
+    /// `handle_cast_spell` hand-rolled a partial `ResolvedAbility::new(...)`
+    /// that dropped `player_scope`, so `Each opponent mills N cards.` resolved
+    /// against the printed controller (the caster) instead of iterating each
+    /// opponent per CR 608.2 + CR 109.5.
+    #[test]
+    fn cast_spell_propagates_player_scope_into_resolved_ability() {
+        use crate::types::ability::{AbilityDefinition, AbilityKind, PlayerFilter};
+        use crate::types::zones::Zone;
+
+        let mut state = setup_game_at_main_phase();
+
+        // Maddening Cacophony shape: 2-cost blue sorcery with
+        // `player_scope: Opponent` on the printed Mill ability.
+        let cacophony_id = create_object(
+            &mut state,
+            CardId(310),
+            PlayerId(0),
+            "Each-Opponent Mill Sorcery".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&cacophony_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Sorcery);
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::Blue],
+                generic: 1,
+            };
+            let def = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Mill {
+                    count: QuantityExpr::Fixed { value: 8 },
+                    target: TargetFilter::Controller,
+                    destination: Zone::Graveyard,
+                },
+            )
+            .player_scope(PlayerFilter::Opponent);
+            Arc::make_mut(&mut obj.abilities).push(def);
+        }
+
+        // Stock both libraries so Mill has cards to move.
+        for i in 0..10 {
+            create_object(
+                &mut state,
+                CardId(1000 + i),
+                PlayerId(0),
+                format!("P0 Library {i}"),
+                Zone::Library,
+            );
+            create_object(
+                &mut state,
+                CardId(2000 + i),
+                PlayerId(1),
+                format!("P1 Library {i}"),
+                Zone::Library,
+            );
+        }
+
+        add_mana(&mut state, PlayerId(0), ManaType::Blue, 1);
+        add_mana(&mut state, PlayerId(0), ManaType::Colorless, 1);
+
+        let mut events = Vec::new();
+        let waiting = handle_cast_spell(
+            &mut state,
+            PlayerId(0),
+            cacophony_id,
+            CardId(310),
+            &mut events,
+        )
+        .unwrap();
+        assert!(matches!(waiting, WaitingFor::Priority { .. }));
+        assert_eq!(state.stack.len(), 1, "spell must be on the stack");
+
+        // Resolve the spell from the stack — this exercises the same path
+        // production hits when both players pass priority.
+        let caster_library_before = state.players[0].library.len();
+        let opponent_library_before = state.players[1].library.len();
+        super::stack::resolve_top(&mut state, &mut events);
+
+        // Caster's library MUST be untouched (issue #310 user complaint:
+        // "Mills me instead of opponent"). The sorcery itself moves from
+        // stack to its owner's graveyard on resolution per CR 608.2g, but
+        // no library cards may transfer to graveyard for the caster.
+        assert_eq!(
+            state.players[0].library.len(),
+            caster_library_before,
+            "Each opponent mills must not move cards out of the caster's library",
+        );
+        // Opponent must be milled — 8 cards leave their library and reach
+        // their graveyard.
+        assert_eq!(
+            state.players[1].library.len(),
+            opponent_library_before - 8,
+            "opponent must lose 8 library cards to mill",
+        );
+        assert_eq!(
+            state.players[1].graveyard.len(),
+            8,
+            "opponent must have 8 cards in graveyard from mill",
         );
     }
 }

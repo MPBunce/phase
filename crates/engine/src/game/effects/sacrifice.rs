@@ -701,4 +701,91 @@ mod tests {
         assert!(!state.cost_payment_failed_flag);
         assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
     }
+
+    /// Issue #320 (Tergrid's Shadow): "Each player sacrifices two creatures."
+    /// parses as `Effect::Sacrifice { target: Typed(Creature, controller: None) }`
+    /// with `player_scope: All`. Per CR 608.2 + CR 109.5, the player_scope
+    /// iteration loop must rebind `controller` to each player so the
+    /// sacrifice resolver picks the iterated player as chooser. Resolved
+    /// incidentally by the issue #310 spell-cast `player_scope` propagation
+    /// fix, but pinned here at the resolver layer for direct coverage.
+    #[test]
+    fn player_scope_all_sacrifice_iterates_each_player() {
+        use crate::game::effects::resolve_ability_chain;
+        use crate::types::ability::{PlayerFilter, TypeFilter, TypedFilter};
+        use crate::types::card_type::CoreType;
+
+        let mut state = GameState::new_two_player(42);
+        // Caster has 2 creatures, opponent has 2 creatures.
+        let mut all_creatures = Vec::new();
+        for (player, base) in [(PlayerId(0), 10), (PlayerId(1), 20)] {
+            for offset in 0..2 {
+                let id = create_object(
+                    &mut state,
+                    CardId(base + offset),
+                    player,
+                    format!("P{} Creature {offset}", player.0),
+                    Zone::Battlefield,
+                );
+                state
+                    .objects
+                    .get_mut(&id)
+                    .unwrap()
+                    .card_types
+                    .core_types
+                    .push(CoreType::Creature);
+                all_creatures.push((player, id));
+            }
+        }
+
+        let mut ability = ResolvedAbility::new(
+            Effect::Sacrifice {
+                target: TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)),
+                count: QuantityExpr::Fixed { value: 2 },
+                min_count: 0,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        ability.player_scope = Some(PlayerFilter::All);
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        // First scoped iteration is APNAP — caster (PlayerId 0). Both their
+        // creatures are auto-sacrificed since count == eligible count.
+        assert!(
+            state.players[0]
+                .graveyard
+                .iter()
+                .filter(|id| all_creatures.iter().any(|(_, c)| c == *id))
+                .count()
+                == 2,
+            "caster must sacrifice 2 creatures"
+        );
+
+        // Second iteration enters EffectZoneChoice because P1 has exactly 2
+        // creatures and count is exactly 2 — but the auto-take path applies
+        // when eligible == count. Either way, the affected player must be
+        // PlayerId(1). If a choice is pending, validate that.
+        match &state.waiting_for {
+            WaitingFor::EffectZoneChoice { player, .. } => {
+                assert_eq!(*player, PlayerId(1), "second scoped player must be P1");
+            }
+            WaitingFor::Priority { .. } => {
+                // Auto-resolved (eligible == count).
+                assert_eq!(
+                    state.players[1]
+                        .graveyard
+                        .iter()
+                        .filter(|id| all_creatures.iter().any(|(_, c)| c == *id))
+                        .count(),
+                    2,
+                    "opponent must also sacrifice 2 creatures"
+                );
+            }
+            other => panic!("unexpected waiting_for: {other:?}"),
+        }
+    }
 }

@@ -114,9 +114,10 @@ pub fn apply_mill_after_replacement(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::effects::resolve_ability_chain;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityDefinition, AbilityKind, ControllerRef, QuantityExpr, QuantityRef,
+        AbilityDefinition, AbilityKind, ControllerRef, PlayerFilter, QuantityExpr, QuantityRef,
         ReplacementDefinition, TargetFilter, TargetRef,
     };
     use crate::types::identifiers::{CardId, ObjectId};
@@ -299,5 +300,99 @@ mod tests {
 
         assert_eq!(state.players[0].library.len(), 5);
         assert_eq!(state.players[0].graveyard.len(), 3);
+    }
+
+    /// Issue #310 (Maddening Cacophony / Fractured Sanity): "Each opponent
+    /// mills N cards." parses as `Effect::Mill { target: Controller }` with
+    /// `player_scope: Opponent` on the surrounding ability. The
+    /// player_scope iteration loop must rebind `controller` to each opponent
+    /// per CR 608.2 + CR 109.5 so the inner Mill effect mills the iterated
+    /// opponent — not the printed controller.
+    ///
+    /// Three-player coverage: opponents must be expanded in APNAP order so the
+    /// "each opponent" semantics is universal, not just "the next opponent."
+    #[test]
+    fn player_scope_opponent_mill_targets_each_opponent_three_player_apnap() {
+        use crate::types::format::FormatConfig;
+
+        let mut state = GameState::new(FormatConfig::standard(), 3, 42);
+        for p in 0u8..3 {
+            for i in 0u64..6 {
+                create_object(
+                    &mut state,
+                    CardId(100 + (p as u64) * 10 + i),
+                    PlayerId(p),
+                    format!("P{p} Library {i}"),
+                    Zone::Library,
+                );
+            }
+        }
+
+        let mut ability = ResolvedAbility::new(
+            Effect::Mill {
+                count: QuantityExpr::Fixed { value: 3 },
+                target: TargetFilter::Controller,
+                destination: Zone::Graveyard,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        ability.player_scope = Some(PlayerFilter::Opponent);
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        assert_eq!(state.players[0].graveyard.len(), 0, "caster not milled");
+        assert_eq!(state.players[1].graveyard.len(), 3, "opponent 1 milled");
+        assert_eq!(state.players[2].graveyard.len(), 3, "opponent 2 milled");
+    }
+
+    #[test]
+    fn player_scope_opponent_mill_targets_each_opponent_not_controller() {
+        let mut state = GameState::new_two_player(42);
+        for i in 0..8 {
+            create_object(
+                &mut state,
+                CardId(100 + i),
+                PlayerId(0),
+                format!("P0 Library {i}"),
+                Zone::Library,
+            );
+            create_object(
+                &mut state,
+                CardId(200 + i),
+                PlayerId(1),
+                format!("P1 Library {i}"),
+                Zone::Library,
+            );
+        }
+
+        let mut ability = ResolvedAbility::new(
+            Effect::Mill {
+                count: QuantityExpr::Fixed { value: 3 },
+                target: TargetFilter::Controller,
+                destination: Zone::Graveyard,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        ability.player_scope = Some(PlayerFilter::Opponent);
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        // Controller (PlayerId(0)) MUST NOT be milled — only opponents.
+        assert_eq!(
+            state.players[0].graveyard.len(),
+            0,
+            "controller must not be milled by Each opponent mills"
+        );
+        assert_eq!(
+            state.players[1].graveyard.len(),
+            3,
+            "each opponent must be milled"
+        );
     }
 }

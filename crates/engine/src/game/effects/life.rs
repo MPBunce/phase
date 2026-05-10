@@ -913,4 +913,44 @@ mod tests {
             "P1 must not lose life despite being in ability.targets — Controller filter must not consult inherited targets"
         );
     }
+
+    /// Issue #310 audit: "Each opponent loses N life." (Bloodletting,
+    /// Bloodtithe Harvester face, etc.) parses as `Effect::LoseLife
+    /// { target: None }` with `player_scope: Opponent` on the surrounding
+    /// ability. The player_scope iteration loop must rebind `controller`
+    /// to each opponent per CR 608.2 + CR 109.5 so the inner LoseLife
+    /// resolver picks the iterated player as the life loser.
+    #[test]
+    fn player_scope_opponent_lose_life_targets_each_opponent() {
+        use crate::game::effects::resolve_ability_chain;
+        use crate::types::ability::PlayerFilter;
+
+        let mut state = GameState::new_two_player(42);
+        let p0_life_before = state.players[0].life;
+        let p1_life_before = state.players[1].life;
+
+        let mut ability = ResolvedAbility::new(
+            Effect::LoseLife {
+                amount: QuantityExpr::Fixed { value: 2 },
+                target: None,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        ability.player_scope = Some(PlayerFilter::Opponent);
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        assert_eq!(
+            state.players[0].life, p0_life_before,
+            "caster must not lose life from Each opponent loses N life"
+        );
+        assert_eq!(
+            state.players[1].life,
+            p1_life_before - 2,
+            "opponent must lose 2 life"
+        );
+    }
 }

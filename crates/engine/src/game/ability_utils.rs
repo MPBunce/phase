@@ -2636,6 +2636,30 @@ mod tests {
         assert!(matches!(draw_node.effect, Effect::Draw { .. }));
     }
 
+    /// Issue #310: spell-cast and ability-activate paths now delegate to
+    /// `build_resolved_from_def` so `player_scope` survives end-to-end. Pin
+    /// that contract so accidental partial-clone regressions in casting
+    /// surface here too.
+    #[test]
+    fn build_resolved_from_def_preserves_player_scope() {
+        let def = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Mill {
+                count: QuantityExpr::Fixed { value: 4 },
+                target: TargetFilter::Controller,
+                destination: crate::types::zones::Zone::Graveyard,
+            },
+        )
+        .player_scope(crate::types::ability::PlayerFilter::Opponent);
+
+        let resolved = build_resolved_from_def(&def, ObjectId(1), PlayerId(0));
+        assert_eq!(
+            resolved.player_scope,
+            Some(crate::types::ability::PlayerFilter::Opponent),
+            "player_scope must survive build_resolved_from_def — issue #310",
+        );
+    }
+
     #[test]
     fn build_resolved_from_def_preserves_unless_pay_modifier() {
         let modifier = UnlessPayModifier {
