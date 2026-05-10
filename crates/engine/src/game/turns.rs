@@ -79,6 +79,15 @@ pub fn advance_phase(state: &mut GameState, events: &mut Vec<GameEvent>) {
         }
     }
 
+    enter_phase(state, next, events);
+}
+
+/// Enter a phase directly: set phase, clear mana pools (CR 500.5), reset
+/// priority (CR 117.3a), invalidate LKI (CR 400.7), emit PhaseChanged.
+/// Called by `advance_phase` after extra-phase/replacement resolution, and
+/// directly by callers that need to skip intermediate phases (e.g.,
+/// CR 508.8 combat-skip when no attackers are possible).
+fn enter_phase(state: &mut GameState, next: Phase, events: &mut Vec<GameEvent>) {
     state.phase = next;
     if next == Phase::BeginCombat {
         state.combat_phases_started_this_turn =
@@ -1112,18 +1121,12 @@ pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> Waiti
                     advance_phase(state, events);
                     // Continue to DeclareAttackers
                 } else {
-                    // No triggers, no attackers — skip all combat phases.
+                    // CR 508.8: No attackers possible and no begin-combat
+                    // triggers — skip declare attackers through end of combat.
+                    // Don't return: continue the loop so the PostCombatMain
+                    // match arm runs process_phase_triggers (survival, etc.).
                     state.combat = None;
-                    state.phase = Phase::PostCombatMain;
-                    state.priority_player = state.active_player;
-                    state.priority_passes.clear();
-                    state.priority_pass_count = 0;
-                    events.push(GameEvent::PhaseChanged {
-                        phase: Phase::PostCombatMain,
-                    });
-                    return WaitingFor::Priority {
-                        player: state.active_player,
-                    };
+                    enter_phase(state, Phase::PostCombatMain, events);
                 }
             }
             Phase::DeclareAttackers => {
