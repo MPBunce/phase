@@ -1947,12 +1947,12 @@ mod tests {
         AbilityCondition, AbilityCost, AbilityKind, ContinuousModification, ControllerRef,
         DevotionColors, Duration, Effect, LinkedExileScope, ManaContribution, ManaProduction,
         MultiTargetSpec, PlayerScope, QuantityExpr, QuantityRef, StaticDefinition, TargetFilter,
-        TypedFilter,
+        TypeFilter, TypedFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::game_state::{ExileLink, ExileLinkKind};
     use crate::types::identifiers::CardId;
-    use crate::types::mana::{ManaColor, ManaCostShard, ManaType};
+    use crate::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType};
     use crate::types::statics::{CostPaymentProhibition, ProhibitionScope, StaticMode};
     use crate::types::triggers::TriggerMode;
     use crate::types::zones::Zone;
@@ -4427,6 +4427,81 @@ mod tests {
         assert!(
             !can_activate_mana_ability_now(&state, player, land, 0, &def),
             "Gemstone Mine must not be activatable when it has no mining counters"
+        );
+    }
+
+    #[test]
+    fn cabal_coffers_pays_generic_taps_and_counts_swamps() {
+        let mut state = GameState::new_two_player(42);
+        let player = PlayerId(0);
+        let coffers = create_object(
+            &mut state,
+            CardId(9001),
+            player,
+            "Cabal Coffers".to_string(),
+            Zone::Battlefield,
+        );
+        let ability = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Mana {
+                produced: ManaProduction::AnyOneColor {
+                    count: QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount {
+                            filter: TargetFilter::Typed(
+                                TypedFilter::new(TypeFilter::Subtype("Swamp".to_string()))
+                                    .controller(ControllerRef::You),
+                            ),
+                        },
+                    },
+                    color_options: vec![ManaColor::Black],
+                    contribution: ManaContribution::Base,
+                },
+                restrictions: Vec::new(),
+                grants: Vec::new(),
+                expiry: None,
+                target: None,
+            },
+        )
+        .cost(AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::Mana {
+                    cost: ManaCost::generic(2),
+                },
+                AbilityCost::Tap,
+            ],
+        });
+        Arc::make_mut(&mut state.objects.get_mut(&coffers).unwrap().abilities)
+            .push(ability.clone());
+
+        for idx in 0..3 {
+            let swamp = create_object(
+                &mut state,
+                CardId(9010 + idx),
+                player,
+                "Swamp".to_string(),
+                Zone::Battlefield,
+            );
+            let obj = state.objects.get_mut(&swamp).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            obj.card_types.subtypes.push("Swamp".to_string());
+        }
+        seed_pool_with(&mut state, player, ManaType::Black, 2);
+
+        assert!(
+            can_activate_mana_ability_now(&state, player, coffers, 0, &ability),
+            "Cabal Coffers must be activatable with two mana available"
+        );
+
+        let mut events = Vec::new();
+        resolve_mana_ability(&mut state, coffers, player, &ability, &mut events, None)
+            .expect("Cabal Coffers activation must pay {2}, tap, and add mana");
+
+        assert!(state.objects.get(&coffers).unwrap().tapped);
+        assert_eq!(
+            state.players[player.0 as usize]
+                .mana_pool
+                .count_color(ManaType::Black),
+            3
         );
     }
 
