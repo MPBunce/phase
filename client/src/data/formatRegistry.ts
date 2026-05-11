@@ -24,6 +24,7 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
       range_of_influence: null,
       team_based: false,
       uses_commander: false,
+      allow_debug_actions: false,
     },
   },
   {
@@ -44,6 +45,7 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
       range_of_influence: null,
       team_based: false,
       uses_commander: false,
+      allow_debug_actions: false,
     },
   },
   {
@@ -64,6 +66,7 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
       range_of_influence: null,
       team_based: false,
       uses_commander: false,
+      allow_debug_actions: false,
     },
   },
   {
@@ -84,6 +87,7 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
       range_of_influence: null,
       team_based: false,
       uses_commander: false,
+      allow_debug_actions: false,
     },
   },
   {
@@ -104,6 +108,7 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
       range_of_influence: null,
       team_based: false,
       uses_commander: false,
+      allow_debug_actions: false,
     },
   },
   {
@@ -124,6 +129,7 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
       range_of_influence: null,
       team_based: false,
       uses_commander: false,
+      allow_debug_actions: false,
     },
   },
   {
@@ -144,6 +150,7 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
       range_of_influence: null,
       team_based: false,
       uses_commander: false,
+      allow_debug_actions: false,
     },
   },
   {
@@ -164,6 +171,7 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
       range_of_influence: null,
       team_based: false,
       uses_commander: false,
+      allow_debug_actions: false,
     },
   },
   {
@@ -184,6 +192,7 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
       range_of_influence: null,
       team_based: false,
       uses_commander: true,
+      allow_debug_actions: false,
     },
   },
   {
@@ -204,6 +213,7 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
       range_of_influence: null,
       team_based: false,
       uses_commander: true,
+      allow_debug_actions: false,
     },
   },
   {
@@ -224,6 +234,7 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
       range_of_influence: null,
       team_based: false,
       uses_commander: true,
+      allow_debug_actions: false,
     },
   },
   {
@@ -244,6 +255,7 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
       range_of_influence: null,
       team_based: false,
       uses_commander: true,
+      allow_debug_actions: false,
     },
   },
   {
@@ -264,6 +276,7 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
       range_of_influence: null,
       team_based: false,
       uses_commander: true,
+      allow_debug_actions: false,
     },
   },
   {
@@ -284,6 +297,7 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
       range_of_influence: null,
       team_based: false,
       uses_commander: false,
+      allow_debug_actions: false,
     },
   },
 ];
@@ -306,6 +320,7 @@ export const LIMITED_FORMAT_CONFIG: FormatMetadata = {
     range_of_influence: null,
     team_based: false,
     uses_commander: false,
+    allow_debug_actions: false,
   },
 };
 

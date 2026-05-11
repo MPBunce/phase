@@ -797,6 +797,35 @@ impl SessionManager {
             ));
         }
 
+        // Debug / Grant / Revoke bypass the priority-holder and legal-action
+        // gates entirely — they're out-of-band sandbox controls already gated
+        // by `debug_permitted` (Debug) and host-only checks (Grant/Revoke)
+        // above. Mirror the ReorderHand path: delegate to engine, broadcast
+        // the audit event.
+        if matches!(
+            action,
+            GameAction::Debug(_)
+                | GameAction::GrantDebugPermission { .. }
+                | GameAction::RevokeDebugPermission { .. }
+        ) {
+            let result = apply(&mut session.state, player, action).map_err(|e| {
+                warn!(game = %game_code, player = ?player, error = %e, reason = "engine_error", "action rejected");
+                format!("Engine error: {}", e)
+            })?;
+            let (new_legal_actions, spell_costs, by_object) =
+                engine_legal_actions_full(&session.state);
+            let auto_pass = auto_pass_recommended(&session.state, &new_legal_actions);
+            return Ok((
+                session.state.clone(),
+                result.events,
+                new_legal_actions,
+                result.log_entries,
+                auto_pass,
+                spell_costs,
+                by_object,
+            ));
+        }
+
         // Validate it's this player's turn to act.
         // CR 103.5: For simultaneous mulligan states, every pending player is
         // an authorized actor — use set membership rather than equality with
@@ -1264,5 +1293,232 @@ mod tests {
             vec![id_a, id_b],
             "Hand should be unchanged after invalid reorder"
         );
+    }
+
+    // ── Sandbox capability tests ─────────────────────────────────────────
+
+    fn create_sandbox_game(mgr: &mut SessionManager) -> (String, String) {
+        let sandbox_config = FormatConfig::commander().with_sandbox();
+        mgr.create_game_n_players(
+            make_deck(),
+            "Host".to_string(),
+            None,
+            2,
+            MatchConfig::default(),
+            Some(sandbox_config),
+        )
+    }
+
+    #[test]
+    fn with_sandbox_sets_flag_and_is_idempotent() {
+        let base = FormatConfig::standard();
+        assert!(!base.allow_debug_actions);
+        let sb = base.clone().with_sandbox();
+        assert!(sb.allow_debug_actions);
+        // Idempotent — applying twice yields the same config.
+        let sb2 = sb.clone().with_sandbox();
+        assert_eq!(sb, sb2);
+        // Only the capability flag differs.
+        let restored = FormatConfig {
+            allow_debug_actions: false,
+            ..sb
+        };
+        assert_eq!(restored, base);
+    }
+
+    #[test]
+    fn sandbox_game_seeds_host_in_debug_permitted() {
+        let mut mgr = SessionManager::new();
+        let (code, _token) = create_sandbox_game(&mut mgr);
+        let session = mgr.sessions.get(&code).unwrap();
+        assert!(session.state.format_config.allow_debug_actions);
+        assert!(session.state.debug_mode);
+        assert!(session.state.debug_permitted.contains(&PlayerId(0)));
+        assert_eq!(session.state.debug_permitted.len(), 1);
+    }
+
+    #[test]
+    fn non_sandbox_game_has_empty_debug_permitted() {
+        let mut mgr = SessionManager::new();
+        let (code, _token) = mgr.create_game(make_deck());
+        let session = mgr.sessions.get(&code).unwrap();
+        assert!(!session.state.format_config.allow_debug_actions);
+        assert!(!session.state.debug_mode);
+        assert!(session.state.debug_permitted.is_empty());
+    }
+
+    #[test]
+    fn non_sandbox_rejects_debug_action() {
+        let mut mgr = SessionManager::new();
+        let (code, token) = mgr.create_game(make_deck());
+        let result = mgr.handle_action(
+            &code,
+            &token,
+            GameAction::Debug(engine::types::actions::DebugAction::ShuffleLibrary {
+                player_id: PlayerId(0),
+            }),
+        );
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("not permitted") || err.contains("permission"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn sandbox_accepts_debug_action_from_host() {
+        let mut mgr = SessionManager::new();
+        let (code, token) = create_sandbox_game(&mut mgr);
+        // We can't fully start the game without a database, but ShuffleLibrary
+        // only validates the player exists, so it works against a pregame
+        // state too as long as the player is present. Confirm the gate at
+        // least accepts the action — engine validation may still reject if
+        // pregame state lacks the player, but the *server gate* must not be
+        // the rejecter.
+        let result = mgr.handle_action(
+            &code,
+            &token,
+            GameAction::Debug(engine::types::actions::DebugAction::ShuffleLibrary {
+                player_id: PlayerId(0),
+            }),
+        );
+        // The gate must accept; if engine rejects for other reasons that's
+        // beside the point of this test. We assert the gate-specific error
+        // text is absent.
+        if let Err(e) = &result {
+            assert!(
+                !e.contains("not permitted") && !e.contains("Sandbox"),
+                "Gate rejected the host in a sandbox game: {e}"
+            );
+        }
+        // When the action does succeed, an audit event must be emitted.
+        if let Ok(action_result) = result {
+            let used = action_result.1.iter().any(|e| {
+                matches!(
+                    e,
+                    engine::types::events::GameEvent::DebugActionUsed { description, .. }
+                        if !description.is_empty()
+                )
+            });
+            assert!(used, "Sandbox debug action must emit DebugActionUsed event");
+        }
+    }
+
+    #[test]
+    fn sandbox_rejects_debug_from_non_host_without_permission() {
+        let mut mgr = SessionManager::new();
+        let (code, _host_token) = create_sandbox_game(&mut mgr);
+        let (guest_token, _state) = mgr
+            .join_game_with_name(&code, make_deck(), "Guest".to_string())
+            .expect("guest joins");
+        let result = mgr.handle_action(
+            &code,
+            &guest_token,
+            GameAction::Debug(engine::types::actions::DebugAction::ShuffleLibrary {
+                player_id: PlayerId(1),
+            }),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn host_can_grant_debug_to_guest() {
+        let mut mgr = SessionManager::new();
+        let (code, host_token) = create_sandbox_game(&mut mgr);
+        let (guest_token, _state) = mgr
+            .join_game_with_name(&code, make_deck(), "Guest".to_string())
+            .expect("guest joins");
+
+        // Host grants debug permission to seat 1.
+        let result = mgr.handle_action(
+            &code,
+            &host_token,
+            GameAction::GrantDebugPermission {
+                player_id: PlayerId(1),
+            },
+        );
+        assert!(result.is_ok(), "grant must succeed: {:?}", result.err());
+        let session = mgr.sessions.get(&code).unwrap();
+        assert!(session.state.debug_permitted.contains(&PlayerId(1)));
+
+        // Guest can now submit a debug action.
+        let result = mgr.handle_action(
+            &code,
+            &guest_token,
+            GameAction::Debug(engine::types::actions::DebugAction::ShuffleLibrary {
+                player_id: PlayerId(1),
+            }),
+        );
+        if let Err(e) = &result {
+            assert!(
+                !e.contains("not permitted") && !e.contains("Sandbox"),
+                "Gate rejected the granted guest: {e}"
+            );
+        }
+
+        // Host revokes — guest is no longer permitted.
+        let _ = mgr.handle_action(
+            &code,
+            &host_token,
+            GameAction::RevokeDebugPermission {
+                player_id: PlayerId(1),
+            },
+        );
+        let session = mgr.sessions.get(&code).unwrap();
+        assert!(!session.state.debug_permitted.contains(&PlayerId(1)));
+        assert!(session.state.debug_permitted.contains(&PlayerId(0)));
+    }
+
+    #[test]
+    fn non_host_cannot_grant_debug() {
+        let mut mgr = SessionManager::new();
+        let (code, _host_token) = create_sandbox_game(&mut mgr);
+        let (guest_token, _state) = mgr
+            .join_game_with_name(&code, make_deck(), "Guest".to_string())
+            .expect("guest joins");
+
+        let result = mgr.handle_action(
+            &code,
+            &guest_token,
+            GameAction::GrantDebugPermission {
+                player_id: PlayerId(1),
+            },
+        );
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("host"), "{err}");
+    }
+
+    #[test]
+    fn host_cannot_self_revoke() {
+        let mut mgr = SessionManager::new();
+        let (code, host_token) = create_sandbox_game(&mut mgr);
+        let result = mgr.handle_action(
+            &code,
+            &host_token,
+            GameAction::RevokeDebugPermission {
+                player_id: PlayerId(0),
+            },
+        );
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("own"), "{err}");
+    }
+
+    #[test]
+    fn grant_outside_sandbox_is_rejected() {
+        let mut mgr = SessionManager::new();
+        let (code, token) = mgr.create_game(make_deck());
+        let result = mgr.handle_action(
+            &code,
+            &token,
+            GameAction::GrantDebugPermission {
+                player_id: PlayerId(1),
+            },
+        );
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("Sandbox"), "{err}");
     }
 }

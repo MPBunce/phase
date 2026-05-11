@@ -469,11 +469,15 @@ pub enum GameAction {
     /// in a non-sandbox game (gated server-side on
     /// `format_config.allow_debug_actions`). Only the host can submit this
     /// (server-side check). Bypasses `WaitingFor` like Concede.
-    GrantDebugPermission { player_id: PlayerId },
+    GrantDebugPermission {
+        player_id: PlayerId,
+    },
     /// Sandbox-only host action: revoke a player's debug permission. The
     /// host cannot revoke their own permission (server-side check). Only
     /// the host can submit this.
-    RevokeDebugPermission { player_id: PlayerId },
+    RevokeDebugPermission {
+        player_id: PlayerId,
+    },
     /// CR 104.3a: A player may concede the game at any time. That player leaves the game.
     /// CR 800.4a: When a player leaves a multiplayer game, all objects owned by that player
     /// leave the game and all spells/abilities controlled by that player cease to exist.

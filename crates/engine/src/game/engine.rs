@@ -1050,10 +1050,10 @@ fn apply_action(
     // the actor is the host (PlayerId(0)); this engine handler trusts that
     // and applies the mutation. Emits a public audit event.
     if let GameAction::GrantDebugPermission { player_id } = action {
-        state.debug_permitted.insert(*player_id);
+        state.debug_permitted.insert(player_id);
         events.push(crate::types::events::GameEvent::DebugPermissionGranted {
             host: actor,
-            player_id: *player_id,
+            player_id,
         });
         return Ok(ActionResult {
             events,
@@ -1062,10 +1062,10 @@ fn apply_action(
         });
     }
     if let GameAction::RevokeDebugPermission { player_id } = action {
-        state.debug_permitted.remove(player_id);
+        state.debug_permitted.remove(&player_id);
         events.push(crate::types::events::GameEvent::DebugPermissionRevoked {
             host: actor,
-            player_id: *player_id,
+            player_id,
         });
         return Ok(ActionResult {
             events,

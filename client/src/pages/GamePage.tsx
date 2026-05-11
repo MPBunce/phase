@@ -642,6 +642,9 @@ function GamePageContent({
   const turnNumber = useGameStore((s) => s.gameState?.turn_number);
   const engineWaitingFor = useGameStore((s) => s.gameState?.waiting_for);
   const deckPools = useGameStore((s) => s.gameState?.deck_pools);
+  const isSandboxGame = useGameStore(
+    (s) => s.gameState?.format_config?.allow_debug_actions === true,
+  );
   const [showAiHand, setShowAiHand] = useState(false);
   const [showDebugBounds, setShowDebugBounds] = useState(false);
   const [viewingZone, setViewingZone] = useState<{
@@ -867,6 +870,18 @@ function GamePageContent({
     >
       <BattlefieldBackground />
       <StackDisplay />
+
+      {/* Persistent Sandbox banner — visible to all players whenever the
+          game's format_config has debug actions enabled. Not dismissible. */}
+      {isSandboxGame && (
+        <div
+          className="pointer-events-none fixed left-0 right-0 top-0 z-30 select-none bg-amber-600 px-4 py-1 text-center text-xs font-bold uppercase tracking-wider text-white shadow-md"
+          role="status"
+          aria-label="Sandbox mode banner"
+        >
+          Sandbox Mode — debug actions enabled
+        </div>
+      )}
 
       {/* Reconnecting banner */}
       {reconnectState.status === "reconnecting" && (

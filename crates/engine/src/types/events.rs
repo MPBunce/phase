@@ -508,6 +508,24 @@ pub enum GameEvent {
         source_id: ObjectId,
         exiled_count: u32,
     },
+    /// Sandbox audit log: a player with debug permission submitted a
+    /// `GameAction::Debug(_)`. `description` is the engine-authored summary
+    /// from `DebugAction::describe`; the FE renders it verbatim.
+    DebugActionUsed {
+        player_id: PlayerId,
+        description: String,
+    },
+    /// Sandbox audit log: the host granted a player permission to submit
+    /// `GameAction::Debug(_)`.
+    DebugPermissionGranted {
+        host: PlayerId,
+        player_id: PlayerId,
+    },
+    /// Sandbox audit log: the host revoked a player's debug permission.
+    DebugPermissionRevoked {
+        host: PlayerId,
+        player_id: PlayerId,
+    },
 }
 
 #[cfg(test)]

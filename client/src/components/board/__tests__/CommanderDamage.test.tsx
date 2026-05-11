@@ -91,6 +91,8 @@ function baseGameState(overrides: Partial<GameState> = {}): GameState {
       range_of_influence: null,
       team_based: false,
       uses_commander: true,
+
+      allow_debug_actions: false,
     },
     command_zone: [],
     commander_damage: [],

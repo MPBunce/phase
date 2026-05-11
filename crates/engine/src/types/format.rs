@@ -87,6 +87,13 @@ pub struct FormatConfig {
     /// Historic Brawl. The frontend consumes this directly — it must never
     /// re-list commander-style formats client-side.
     pub uses_commander: bool,
+    /// Capability flag: when true, the server (and other transport gates)
+    /// permit `GameAction::Debug(_)` from any player in this session. Off by
+    /// default. Orthogonal to format — a sandbox Commander game plays
+    /// exactly like a normal Commander game with one additional permission.
+    /// Immutable for the life of the session.
+    #[serde(default)]
+    pub allow_debug_actions: bool,
 }
 
 impl GameFormat {
@@ -340,6 +347,7 @@ impl FormatConfig {
             range_of_influence: None,
             team_based: false,
             uses_commander: false,
+            allow_debug_actions: false,
         }
     }
 
@@ -356,6 +364,7 @@ impl FormatConfig {
             range_of_influence: None,
             team_based: false,
             uses_commander: true,
+            allow_debug_actions: false,
         }
     }
 
@@ -451,6 +460,7 @@ impl FormatConfig {
             range_of_influence: None,
             team_based: false,
             uses_commander: true,
+            allow_debug_actions: false,
         }
     }
 
@@ -475,6 +485,7 @@ impl FormatConfig {
             range_of_influence: None,
             team_based: false,
             uses_commander: false,
+            allow_debug_actions: false,
         }
     }
 
@@ -493,6 +504,7 @@ impl FormatConfig {
             range_of_influence: None,
             team_based: false,
             uses_commander: false,
+            allow_debug_actions: false,
         }
     }
 
@@ -509,7 +521,16 @@ impl FormatConfig {
             range_of_influence: None,
             team_based: true,
             uses_commander: false,
+            allow_debug_actions: false,
         }
+    }
+
+    /// Return a copy of this config with the sandbox capability enabled.
+    /// Pure data transform; the resulting config is otherwise identical and
+    /// keeps the same `GameFormat`, deck/seat/life rules, etc. Idempotent.
+    pub fn with_sandbox(mut self) -> Self {
+        self.allow_debug_actions = true;
+        self
     }
 
     /// Default `FormatConfig` for a given `GameFormat`. Used by callers that
