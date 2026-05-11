@@ -1518,8 +1518,9 @@ pub fn synthesize_persist(face: &mut CardFace) {
 /// Sacrifice count is encoded as `QuantityExpr::Fixed { value: n }`. The
 /// shared sacrifice resolver (`game::effects::sacrifice::resolve`) routes
 /// `ControllerRef::DefendingPlayer` through `resolve_sacrifice_scope` and
-/// handles the "fewer permanents than N" case via the CR 701.16b mandatory-all
-/// fast-path — no separate "as many as possible" plumbing is needed here.
+/// handles the "fewer permanents than N" case via the CR 609.3 "does only as
+/// much as possible" mandatory-all fast-path — no separate "as many as
+/// possible" plumbing is needed here.
 pub fn synthesize_annihilator(face: &mut CardFace) {
     let annihilator_values: Vec<u32> = face
         .keywords
@@ -1551,8 +1552,9 @@ pub fn synthesize_annihilator(face: &mut CardFace) {
         .skip(existing_matching)
         .take(remaining)
     {
-        // CR 701.16a + CR 701.21a: sacrifice scope derives from the target
-        // filter's `ControllerRef`. `DefendingPlayer` routes to
+        // CR 701.21a: sacrifice moves the permanent to its owner's graveyard.
+        // Sacrifice scope derives from the target filter's `ControllerRef`;
+        // `DefendingPlayer` routes to
         // `defending_player_for_attacker(state, source_id)` at resolution.
         let sacrifice_effect = Effect::Sacrifice {
             target: TargetFilter::Typed(
@@ -4338,11 +4340,12 @@ mod annihilator_runtime_tests {
         );
     }
 
-    /// CR 701.16b: when the resolved sacrifice count meets or exceeds the
-    /// defending player's eligible pool and the effect is mandatory, every
-    /// eligible permanent is sacrificed. Annihilator 2 against a defender
-    /// with only one permanent must sacrifice that one permanent (and not
-    /// hang waiting for the second choice).
+    /// CR 609.3: "If an effect attempts to do something impossible, it does
+    /// only as much as possible." When the resolved sacrifice count meets or
+    /// exceeds the defending player's eligible pool and the effect is
+    /// mandatory, every eligible permanent is sacrificed. Annihilator 2
+    /// against a defender with only one permanent must sacrifice that one
+    /// permanent (and not hang waiting for the second choice).
     #[test]
     fn annihilator_with_fewer_permanents_than_n_sacrifices_all_of_them() {
         let face = annihilator_creature_face("Ulamog's Echo", 2);
@@ -4361,9 +4364,10 @@ mod annihilator_runtime_tests {
         let _attacker =
             attack_and_resolve_to_sacrifice(&mut state, &face, PlayerId(0), PlayerId(1));
 
-        // CR 701.16b fast-path: the resolver takes the mandatory-all branch
-        // and does not park in EffectZoneChoice — the sole permanent goes
-        // straight to the graveyard.
+        // CR 609.3 fast-path: the resolver takes the mandatory-all branch
+        // ("does only as much as possible") and does not park in
+        // EffectZoneChoice — the sole permanent goes straight to the
+        // graveyard.
         assert_eq!(
             state.objects.get(&only_one).unwrap().zone,
             Zone::Graveyard,
@@ -4371,7 +4375,7 @@ mod annihilator_runtime_tests {
         );
         assert!(
             !matches!(state.waiting_for, WaitingFor::EffectZoneChoice { .. }),
-            "no EffectZoneChoice — fewer permanents than N means CR 701.16b \
+            "no EffectZoneChoice — fewer permanents than N means CR 609.3 \
              auto-sacrifices the entire pool"
         );
     }
