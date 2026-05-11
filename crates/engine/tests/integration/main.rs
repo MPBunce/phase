@@ -21,6 +21,7 @@ mod madame_null_integration;
 mod master_of_ceremonies;
 mod oracle_parser;
 mod riot_control_regression;
+mod ripples_of_undeath_regression;
 mod rules;
 mod swans_prevention_followup;
 mod tempt_with_discovery;
