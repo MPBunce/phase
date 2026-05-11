@@ -3792,7 +3792,21 @@ fn parse_damage_prevention_replacement(
     // consumes the damage. Class members: Phyrexian Hydra, Vigor, Stormwild
     // Capridor, Hostility.
     if let Some(followup) = extract_prevention_followup(original_text) {
-        let mut followup_def = parse_effect_chain(&followup, AbilityKind::Spell);
+        // CR 608.2k: Static self-prevention replacements (Anti-Venom, Vigor,
+        // Phyrexian Hydra, Stormwild Capridor) host their followup on the
+        // shield-bearing permanent itself. Bare pronouns ("him"/"it"/"this
+        // creature"/"this enchantment") in the rider must bind to `SelfRef`
+        // so PutCounter targets the permanent, not a non-existent parent
+        // target. The rider parse runs through the standard chain pipeline
+        // with `subject: SelfRef` so `resolve_pronoun_target` returns
+        // `SelfRef` per its typed-subject carve-out.
+        let mut followup_ctx = ParseContext {
+            subject: Some(TargetFilter::SelfRef),
+            in_replacement: true,
+            ..ParseContext::default()
+        };
+        let mut followup_def =
+            parse_effect_chain_with_context(&followup, AbilityKind::Spell, &mut followup_ctx);
         // CR 615.5 + CR 609.7: `parse_target` maps "the source's controller" /
         // "that source's controller" to `ParentTargetController` (correct for
         // anaphoric "its controller" in non-prevention contexts). Inside a
@@ -3866,8 +3880,8 @@ fn rewrite_damage_recipient_to_post_replacement_target(def: &mut AbilityDefiniti
 /// route through this helper.
 fn extract_prevention_followup(original_text: &str) -> Option<String> {
     let lower = original_text.to_lowercase();
-    let (_, after) =
-        split_once_on_lower(original_text, &lower, "prevent that damage. ").or_else(|| {
+    let (_, after) = split_once_on_lower(original_text, &lower, "prevent that damage. ")
+        .or_else(|| {
             let (_, after) = split_once_on_lower(original_text, &lower, ". ")?;
             let after_lower = after.to_lowercase();
             if nom_primitives::scan_contains(&after_lower, "prevented this way") {
@@ -3875,6 +3889,17 @@ fn extract_prevention_followup(original_text: &str) -> Option<String> {
             } else {
                 None
             }
+        })
+        // CR 615.5: Same-sentence "prevent that damage and <followup>" form
+        // (Anti-Venom, Ironscale Hydra, Jared Carthalion, Nine Lives). The
+        // four cards in this class share the structural "[gate], prevent
+        // that damage and put <count> <kind> counter[s] on <pronoun>" shape.
+        // Rewrite the connector to a sentence boundary so the followup sub-
+        // parser sees a fresh imperative chunk it can parse against.
+        .or_else(|| {
+            let (_, after_and) =
+                split_once_on_lower(original_text, &lower, "prevent that damage and ")?;
+            Some(("", after_and))
         })?;
     let trimmed = after.trim();
     if trimmed.is_empty() {
