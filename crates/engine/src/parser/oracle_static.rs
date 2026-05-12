@@ -7903,14 +7903,16 @@ fn try_parse_top_of_library_cast_permission(text: &str, lower: &str) -> Option<S
         "you may play lands and cast spells from the top of your library",
     ) {
         let alt_cost = parse_top_of_library_alt_cost_rider(rest, text);
-        return Some(
-            StaticDefinition::new(StaticMode::TopOfLibraryCastPermission {
-                play_mode: CardPlayMode::Play,
-                alt_cost,
-            })
-            .affected(TargetFilter::Any)
-            .description(text.to_string()),
-        );
+        let mut def = StaticDefinition::new(StaticMode::TopOfLibraryCastPermission {
+            play_mode: CardPlayMode::Play,
+            alt_cost,
+        })
+        .affected(TargetFilter::Any)
+        .description(text.to_string());
+        if let Some(condition) = parse_top_of_library_permission_condition(rest) {
+            def = def.condition(condition);
+        }
+        return Some(def);
     }
 
     // Standard form: "you may [play|cast] [filter] from the top of your library".
@@ -7948,14 +7950,30 @@ fn try_parse_top_of_library_cast_permission(text: &str, lower: &str) -> Option<S
 
     let alt_cost = parse_top_of_library_alt_cost_rider(trailing, text);
 
-    Some(
-        StaticDefinition::new(StaticMode::TopOfLibraryCastPermission {
-            play_mode,
-            alt_cost,
-        })
-        .affected(filter)
-        .description(text.to_string()),
+    let mut def = StaticDefinition::new(StaticMode::TopOfLibraryCastPermission {
+        play_mode,
+        alt_cost,
+    })
+    .affected(filter)
+    .description(text.to_string());
+    if let Some(condition) = parse_top_of_library_permission_condition(trailing) {
+        def = def.condition(condition);
+    }
+    Some(def)
+}
+
+fn parse_top_of_library_permission_condition(trailing: &str) -> Option<StaticCondition> {
+    let (rest, condition) = preceded(
+        tag::<_, _, OracleError<'_>>(" as long as "),
+        nom_condition::parse_inner_condition,
     )
+    .parse(trailing)
+    .ok()?;
+    let (rest, _) = opt(tag::<_, _, OracleError<'_>>(".")).parse(rest).ok()?;
+    if !rest.is_empty() {
+        return None;
+    }
+    Some(condition)
 }
 
 /// CR 118.9 + CR 119.4: Helper to parse the optional alt-cost rider that may
@@ -17509,6 +17527,39 @@ mod tests {
             other => panic!("expected TopOfLibraryCastPermission, got {other:?}"),
         }
         assert!(matches!(def.affected, Some(TargetFilter::Any)));
+    }
+
+    #[test]
+    fn top_of_library_cast_permission_keeps_as_long_as_condition() {
+        let text = "You may cast creature spells from the top of your library as long as you control three or more creatures with different powers.";
+        let lower = text.to_lowercase();
+        let def = try_parse_top_of_library_cast_permission(text, &lower)
+            .expect("Augur of Autumn static must parse");
+
+        assert!(
+            matches!(
+                def.condition,
+                Some(StaticCondition::QuantityComparison {
+                    lhs: QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCountDistinct { .. },
+                    },
+                    comparator: Comparator::GE,
+                    rhs: QuantityExpr::Fixed { value: 3 },
+                })
+            ),
+            "expected coven condition, got {:?}",
+            def.condition
+        );
+    }
+
+    #[test]
+    fn top_of_library_cast_permission_rejects_partial_as_long_as_condition() {
+        let trailing =
+            " as long as you control three or more creatures with different powers and a Food.";
+        assert!(
+            parse_top_of_library_permission_condition(trailing).is_none(),
+            "condition parser must not silently accept leftover condition text"
+        );
     }
 
     /// CR 118.9 + CR 119.4: Bolas's Citadel — compound permission line carrying

@@ -14,6 +14,7 @@ use super::error::{OracleError, OracleResult};
 use super::primitives::{parse_article, parse_color, parse_mana_cost, parse_number};
 use super::quantity as nom_quantity;
 use crate::parser::oracle_target::{parse_type_phrase, parse_zone_suffix};
+use crate::parser::oracle_util::parse_subtype;
 use crate::types::ability::{
     AggregateFunction, CastManaObjectScope, CastManaSpentMetric, Comparator, ControllerRef,
     CountScope, DamageGroupKey, FilterProp, ObjectProperty, ObjectScope, PlayerScope, QuantityExpr,
@@ -1256,11 +1257,15 @@ fn parse_control_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
         // → QuantityComparison(ObjectCountDistinct[Name] >= N). Tried before the
         // plain ObjectCount arm so the `with different names` suffix is not
         // mis-classified as a raw count threshold. Field of the Dead canonical.
-        parse_control_count_ge_distinct_names,
+        parse_control_count_ge_distinct_quality,
+        parse_control_count_ge_toughness_gt_power,
+        parse_control_count_ge_subtype_disjunction,
         // "you control N or more [type]" → QuantityComparison(ObjectCount >= N)
         parse_control_count_ge,
         // "you control N or fewer [type]" → QuantityComparison(ObjectCount <= N)
         parse_control_count_le,
+        // "you control exactly N [type]" → QuantityComparison(ObjectCount == N)
+        parse_control_count_eq,
         // "you control a/an/another [type]" → IsPresent with filter
         parse_you_control_a,
         // "you don't control a/an [type]" → Not(IsPresent)
@@ -1300,14 +1305,15 @@ fn parse_ge_threshold(input: &str) -> OracleResult<'_, u32> {
     .parse(input)
 }
 
-/// CR 201.2 + CR 603.4: Parse "you control N or more [type] with different names"
-/// → `QuantityComparison { ObjectCountDistinct[Name](filter) >= N }`.
+/// CR 201.2 + CR 208.1 + CR 603.4: Parse
+/// "you control N or more [type] with different [quality]" →
+/// `QuantityComparison { ObjectCountDistinct[quality](filter) >= N }`.
 ///
 /// Field of the Dead: "if you control seven or more lands with different
-/// names". Two objects with the same printed name count once. General enough
-/// to cover any `<article> <type> with different names` suffix, so the class
-/// extends to other distinct-name threshold cards without per-card code.
-fn parse_control_count_ge_distinct_names(input: &str) -> OracleResult<'_, StaticCondition> {
+/// names". Coven cards: "if you control three or more creatures with different
+/// powers". The quality axis is shared with search selection constraints and
+/// `QuantityRef::ObjectCountDistinct`.
+fn parse_control_count_ge_distinct_quality(input: &str) -> OracleResult<'_, StaticCondition> {
     let (rest, _) = tag("you control ").parse(input)?;
     let (rest, n) = parse_ge_threshold(rest)?;
     let type_text = rest.trim_end_matches('.');
@@ -1318,9 +1324,15 @@ fn parse_control_count_ge_distinct_names(input: &str) -> OracleResult<'_, Static
             nom::error::ErrorKind::Fail,
         )));
     }
-    // Require the exact "with different names" suffix on the remainder.
     let trimmed = remainder.trim_start();
-    let (after_suffix, _) = tag("with different names").parse(trimmed)?;
+    let (after_suffix, quality) = preceded(
+        tag("with different "),
+        alt((
+            value(SharedQuality::Name, tag("names")),
+            value(SharedQuality::Power, tag("powers")),
+        )),
+    )
+    .parse(trimmed)?;
     let filter = inject_controller_you(filter);
     let consumed = after_suffix.as_ptr() as usize - input.as_ptr() as usize;
     Ok((
@@ -1329,13 +1341,78 @@ fn parse_control_count_ge_distinct_names(input: &str) -> OracleResult<'_, Static
             lhs: QuantityExpr::Ref {
                 qty: QuantityRef::ObjectCountDistinct {
                     filter,
-                    qualities: vec![SharedQuality::Name],
+                    qualities: vec![quality],
                 },
             },
             comparator: Comparator::GE,
             rhs: QuantityExpr::Fixed { value: n as i32 },
         },
     ))
+}
+
+/// CR 208.1 + CR 603.4: Parse
+/// "you control N or more creatures that each have toughness greater than their power"
+/// as an `ObjectCount` threshold over the existing `ToughnessGTPower` filter property.
+fn parse_control_count_ge_toughness_gt_power(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = tag("you control ").parse(input)?;
+    let (rest, n) = parse_ge_threshold(rest)?;
+    let type_text = rest.trim_end_matches('.');
+    let (filter, remainder) = parse_type_phrase(type_text);
+    if matches!(filter, TargetFilter::Any) {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+    let trimmed = remainder.trim_start();
+    let (after_suffix, _) =
+        tag("that each have toughness greater than their power").parse(trimmed)?;
+    let filter = inject_controller_you(add_filter_property(filter, FilterProp::ToughnessGTPower));
+    let consumed = after_suffix.as_ptr() as usize - input.as_ptr() as usize;
+    Ok((
+        &input[consumed..],
+        make_quantity_comparison(QuantityRef::ObjectCount { filter }, Comparator::GE, n),
+    ))
+}
+
+/// CR 205.3m + CR 603.4: Parse
+/// "you control N or more [subtype] and/or [subtype]" threshold gates.
+///
+/// Tovolar's "Wolves and/or Werewolves" is the canonical surface form: the
+/// threshold counts objects matching either creature subtype, not two separate
+/// thresholds.
+fn parse_control_count_ge_subtype_disjunction(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = tag("you control ").parse(input)?;
+    let (rest, n) = parse_ge_threshold(rest)?;
+    let (first, first_len) = parse_subtype(rest).ok_or_else(|| {
+        nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Fail))
+    })?;
+    let rest = &rest[first_len..];
+    let (rest, _) = alt((tag(" and/or "), tag(" or "))).parse(rest)?;
+    let (second, second_len) = parse_subtype(rest).ok_or_else(|| {
+        nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Fail))
+    })?;
+    let rest = &rest[second_len..];
+    let filter = TargetFilter::Or {
+        filters: vec![
+            controlled_battlefield_subtype_filter(first),
+            controlled_battlefield_subtype_filter(second),
+        ],
+    };
+    Ok((
+        rest,
+        make_quantity_comparison(QuantityRef::ObjectCount { filter }, Comparator::GE, n),
+    ))
+}
+
+fn controlled_battlefield_subtype_filter(subtype: String) -> TargetFilter {
+    TargetFilter::Typed(
+        TypedFilter::new(TypeFilter::Subtype(subtype))
+            .controller(ControllerRef::You)
+            .properties(vec![FilterProp::InZone {
+                zone: Zone::Battlefield,
+            }]),
+    )
 }
 
 /// Canonical combinator: "you control N or more [type]" → QuantityComparison.
@@ -1406,6 +1483,33 @@ fn parse_you_control_a(input: &str) -> OracleResult<'_, StaticCondition> {
     ))
 }
 
+fn add_filter_property(filter: TargetFilter, prop: FilterProp) -> TargetFilter {
+    match filter {
+        TargetFilter::Typed(mut typed) => {
+            typed.properties.push(prop);
+            TargetFilter::Typed(typed)
+        }
+        TargetFilter::Or { filters } => TargetFilter::Or {
+            filters: filters
+                .into_iter()
+                .map(|filter| add_filter_property(filter, prop.clone()))
+                .collect(),
+        },
+        TargetFilter::And { filters } => TargetFilter::And {
+            filters: filters
+                .into_iter()
+                .map(|filter| add_filter_property(filter, prop.clone()))
+                .collect(),
+        },
+        other => TargetFilter::And {
+            filters: vec![
+                other,
+                TargetFilter::Typed(TypedFilter::default().properties(vec![prop])),
+            ],
+        },
+    }
+}
+
 /// Parse "you control N or fewer [type]" → QuantityComparison(ObjectCount <= N).
 fn parse_control_count_le(input: &str) -> OracleResult<'_, StaticCondition> {
     let (rest, _) = tag("you control ").parse(input)?;
@@ -1425,6 +1529,27 @@ fn parse_control_count_le(input: &str) -> OracleResult<'_, StaticCondition> {
     Ok((
         &input[consumed..],
         make_quantity_comparison(QuantityRef::ObjectCount { filter }, Comparator::LE, n),
+    ))
+}
+
+/// Parse "you control exactly N [type]" → QuantityComparison(ObjectCount == N).
+fn parse_control_count_eq(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = tag("you control exactly ").parse(input)?;
+    let (rest, n) = parse_number(rest)?;
+    let rest = rest.trim_start();
+    let type_text = rest.trim_end_matches('.');
+    let (filter, remainder) = parse_type_phrase(type_text);
+    if matches!(filter, TargetFilter::Any) {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+    let filter = inject_controller_you(filter);
+    let consumed = remainder.as_ptr() as usize - input.as_ptr() as usize;
+    Ok((
+        &input[consumed..],
+        make_quantity_comparison(QuantityRef::ObjectCount { filter }, Comparator::EQ, n),
     ))
 }
 
@@ -4291,6 +4416,107 @@ mod tests {
                 }
             }
             _ => panic!("expected QuantityComparison, got {:?}", c),
+        }
+    }
+
+    #[test]
+    fn test_you_control_n_or_more_with_different_powers() {
+        let (rest, c) =
+            parse_inner_condition("you control three or more creatures with different powers")
+                .unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCountDistinct { filter, qualities },
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 3 },
+            } => {
+                assert_eq!(qualities, vec![SharedQuality::Power]);
+                assert!(matches!(filter, TargetFilter::Typed(_)));
+            }
+            other => panic!("expected ObjectCountDistinct Power GE 3, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_you_control_count_ge_toughness_greater_than_power() {
+        let (rest, c) = parse_inner_condition(
+            "you control three or more creatures that each have toughness greater than their power",
+        )
+        .unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount { filter },
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 3 },
+            } => match filter {
+                TargetFilter::Typed(typed) => {
+                    assert!(
+                        typed
+                            .properties
+                            .iter()
+                            .any(|prop| matches!(prop, FilterProp::ToughnessGTPower)),
+                        "expected ToughnessGTPower property, got {:?}",
+                        typed.properties
+                    );
+                }
+                other => panic!("expected typed filter, got {other:?}"),
+            },
+            other => panic!("expected ObjectCount GE 3, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_you_control_count_ge_subtype_and_or_subtype() {
+        let (rest, c) =
+            parse_inner_condition("you control three or more wolves and/or werewolves").unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount { filter },
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 3 },
+            } => match filter {
+                TargetFilter::Or { filters } => {
+                    assert_eq!(filters.len(), 2);
+                    assert!(filters.iter().all(|filter| matches!(
+                        filter,
+                        TargetFilter::Typed(TypedFilter {
+                            controller: Some(ControllerRef::You),
+                            ..
+                        })
+                    )));
+                }
+                other => panic!("expected subtype disjunction, got {other:?}"),
+            },
+            other => panic!("expected ObjectCount GE 3, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_you_control_exactly_one_creature() {
+        let (rest, c) = parse_inner_condition("you control exactly one creature").unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount { .. },
+                    },
+                comparator: Comparator::EQ,
+                rhs: QuantityExpr::Fixed { value: 1 },
+            } => {}
+            other => panic!("expected ObjectCount EQ 1, got {other:?}"),
         }
     }
 

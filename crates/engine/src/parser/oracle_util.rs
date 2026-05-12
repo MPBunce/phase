@@ -661,6 +661,7 @@ const SUBTYPE_PLURALS: &[(&str, &str)] = &[
     ("elves", "Elf"),
     ("dwarves", "Dwarf"),
     ("wolves", "Wolf"),
+    ("werewolves", "Werewolf"),
     ("halves", "Half"),
     ("fungi", "Fungus"),
     ("loci", "Locus"),
@@ -2402,6 +2403,10 @@ mod tests {
         assert_eq!(parse_subtype("elves"), Some(("Elf".to_string(), 5)));
         assert_eq!(parse_subtype("dwarves"), Some(("Dwarf".to_string(), 7)));
         assert_eq!(parse_subtype("wolves"), Some(("Wolf".to_string(), 6)));
+        assert_eq!(
+            parse_subtype("werewolves"),
+            Some(("Werewolf".to_string(), 10))
+        );
     }
 
     #[test]
