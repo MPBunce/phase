@@ -155,69 +155,123 @@ pub fn start_quick_draft(
     Ok(to_js(&view))
 }
 
+/// Apply the human player's pick at seat 0, then resolve every bot pick.
+///
+/// Per Arena Quick Draft model: bots pick instantly after the human. Shared by
+/// [`submit_pick`] (player chose a card) and [`auto_pick`] (AI chose for them).
+/// Only valid for Quick Draft sessions — in 8-human Premier/Traditional pods,
+/// seats 1-7 are real players and the multi-seat API (`submit_pick_for_seat`)
+/// must be used instead.
+fn apply_human_pick_and_resolve_bots(
+    draft_session: &mut DraftSession,
+    human_card_id: String,
+) -> Result<(), JsValue> {
+    if !matches!(draft_session.config.kind, DraftKind::Quick) {
+        return Err(JsValue::from_str(
+            "apply_human_pick_and_resolve_bots is only valid for Quick Draft",
+        ));
+    }
+
+    session::apply(
+        draft_session,
+        DraftAction::Pick {
+            seat: 0,
+            card_instance_id: human_card_id,
+        },
+        None,
+    )
+    .map_err(|e| JsValue::from_str(&format!("Human pick failed: {}", e)))?;
+
+    let difficulty = DIFFICULTY.with(|cell| cell.get());
+    let mut rng = RNG
+        .with(|cell| cell.take())
+        .ok_or_else(|| JsValue::from_str("RNG not initialized"))?;
+
+    let result = CARD_DB.with(|cell| {
+        let db_borrow = cell.borrow();
+        let card_db = db_borrow.as_ref();
+
+        for seat in 1..8u8 {
+            let Some(Some(pack)) = draft_session.current_pack.get(seat as usize) else {
+                continue;
+            };
+            if pack.0.is_empty() {
+                continue;
+            }
+
+            let pick_idx = bot_ai::bot_pick(
+                &pack.0,
+                difficulty,
+                &draft_session.pools[seat as usize],
+                card_db,
+                &mut rng,
+            );
+            let pick_id = pack.0[pick_idx].instance_id.clone();
+
+            session::apply(
+                draft_session,
+                DraftAction::Pick {
+                    seat,
+                    card_instance_id: pick_id,
+                },
+                None,
+            )
+            .map_err(|e| JsValue::from_str(&format!("Bot {seat} pick failed: {}", e)))?;
+        }
+
+        Ok::<(), JsValue>(())
+    });
+
+    RNG.with(|cell| cell.set(Some(rng)));
+    result
+}
+
 /// Submit the human player's pick and resolve all bot picks synchronously.
 ///
-/// Per Arena Quick Draft model: bots pick instantly after the human.
 /// Returns the updated DraftPlayerView.
 #[wasm_bindgen]
 pub fn submit_pick(card_instance_id: &str) -> Result<JsValue, JsValue> {
     let card_id = card_instance_id.to_string();
-
     with_draft_mut(|draft_session| {
-        // 1. Apply human pick (seat 0)
-        session::apply(
-            draft_session,
-            DraftAction::Pick {
-                seat: 0,
-                card_instance_id: card_id,
-            },
-            None,
-        )
-        .map_err(|e| JsValue::from_str(&format!("Human pick failed: {}", e)))?;
+        apply_human_pick_and_resolve_bots(draft_session, card_id)?;
+        Ok(to_js(&filter_for_player(draft_session, 0)))
+    })
+}
 
-        // 2. Resolve bot picks for seats 1..8
+/// Auto-pick the best card from the human's current pack using the same AI the
+/// bots use (at the active difficulty), then resolve all bot picks.
+///
+/// Returns the updated DraftPlayerView.
+#[wasm_bindgen]
+pub fn auto_pick() -> Result<JsValue, JsValue> {
+    with_draft_mut(|draft_session| {
+        let pack = draft_session
+            .current_pack
+            .first()
+            .and_then(|p| p.as_ref())
+            .ok_or_else(|| JsValue::from_str("No pack to pick from"))?;
+        if pack.0.is_empty() {
+            return Err(JsValue::from_str("Pack is empty"));
+        }
+
         let difficulty = DIFFICULTY.with(|cell| cell.get());
         let mut rng = RNG
             .with(|cell| cell.take())
             .ok_or_else(|| JsValue::from_str("RNG not initialized"))?;
-
-        CARD_DB.with(|cell| {
+        let card_id = CARD_DB.with(|cell| {
             let db_borrow = cell.borrow();
-            let card_db = db_borrow.as_ref();
-
-            for seat in 1..8u8 {
-                let has_pack = draft_session
-                    .current_pack
-                    .get(seat as usize)
-                    .is_some_and(|p| p.is_some());
-
-                if has_pack {
-                    let pack = draft_session.current_pack[seat as usize].as_ref().unwrap();
-                    if pack.0.is_empty() {
-                        continue;
-                    }
-                    let pool = &draft_session.pools[seat as usize];
-
-                    let pick_idx = bot_ai::bot_pick(&pack.0, difficulty, pool, card_db, &mut rng);
-                    let pick_id = pack.0[pick_idx].instance_id.clone();
-
-                    session::apply(
-                        draft_session,
-                        DraftAction::Pick {
-                            seat,
-                            card_instance_id: pick_id,
-                        },
-                        None,
-                    )
-                    .map_err(|e| JsValue::from_str(&format!("Bot {seat} pick failed: {}", e)))?;
-                }
-            }
-
-            Ok::<(), JsValue>(())
-        })?;
-
+            let pick_idx = bot_ai::bot_pick(
+                &pack.0,
+                difficulty,
+                &draft_session.pools[0],
+                db_borrow.as_ref(),
+                &mut rng,
+            );
+            pack.0[pick_idx].instance_id.clone()
+        });
         RNG.with(|cell| cell.set(Some(rng)));
 
+        apply_human_pick_and_resolve_bots(draft_session, card_id)?;
         Ok(to_js(&filter_for_player(draft_session, 0)))
     })
 }

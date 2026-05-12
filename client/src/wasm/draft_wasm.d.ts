@@ -21,6 +21,14 @@ export function all_picks_submitted(): boolean;
 export function apply_draft_action(action_json: string): any;
 
 /**
+ * Auto-pick the best card from the human's current pack using the same AI the
+ * bots use (at the active difficulty), then resolve all bot picks.
+ *
+ * Returns the updated DraftPlayerView.
+ */
+export function auto_pick(): any;
+
+/**
  * Create a multiplayer draft session. Used by the P2P host to initialize a
  * Premier or Traditional draft with human + bot seats.
  *
@@ -142,7 +150,6 @@ export function submit_deck_for_seat(seat: number, main_deck_json: string): any;
 /**
  * Submit the human player's pick and resolve all bot picks synchronously.
  *
- * Per Arena Quick Draft model: bots pick instantly after the human.
  * Returns the updated DraftPlayerView.
  */
 export function submit_pick(card_instance_id: string): any;
@@ -177,6 +184,7 @@ export interface InitOutput {
     readonly memory: WebAssembly.Memory;
     readonly all_picks_submitted: () => [number, number, number];
     readonly apply_draft_action: (a: number, b: number) => [number, number, number];
+    readonly auto_pick: () => [number, number, number];
     readonly create_multiplayer_draft: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number];
     readonly export_draft_session: () => [number, number, number, number];
     readonly get_bot_deck: (a: number) => [number, number, number];

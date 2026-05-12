@@ -129,6 +129,12 @@ export class DraftAdapter {
     return wasm.submit_pick(cardInstanceId) as DraftPlayerView;
   }
 
+  /** Let the bot AI pick the best card from the current pack for the player. */
+  async autoPick(): Promise<DraftPlayerView> {
+    const wasm = await ensureDraftWasm();
+    return wasm.auto_pick() as DraftPlayerView;
+  }
+
   async getView(): Promise<DraftPlayerView> {
     const wasm = await ensureDraftWasm();
     return wasm.get_view() as DraftPlayerView;
