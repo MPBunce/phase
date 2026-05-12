@@ -102,12 +102,11 @@ pub fn resolve(
                 if !gate_passes {
                     continue;
                 }
-                let ct = crate::types::counter::parse_counter_type(&counter_type);
                 super::counters::add_counter_with_replacement(
                     state,
                     ability.controller,
                     ability.source_id,
-                    ct,
+                    counter_type,
                     n,
                     events,
                 );

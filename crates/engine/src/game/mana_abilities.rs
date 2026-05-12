@@ -2,6 +2,8 @@ use crate::types::ability::{
     AbilityCost, AbilityDefinition, ChoiceValue, CostPaidObjectSnapshot, Effect, ManaProduction,
     ResolvedAbility, TargetFilter,
 };
+#[cfg(test)]
+use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
     GameState, ManaAbilityResume, ManaChoice, ManaChoiceContext, ManaChoicePrompt,
@@ -1342,11 +1344,10 @@ where
                         counter_type,
                         target: None,
                     } => {
-                        let counter_kind = crate::types::counter::parse_counter_type(counter_type);
                         super::effects::counters::remove_counter_with_replacement(
                             state,
                             source_id,
-                            counter_kind,
+                            counter_type.clone(),
                             *count,
                             events,
                         );
@@ -4442,7 +4443,7 @@ mod tests {
                 AbilityCost::Tap,
                 AbilityCost::RemoveCounter {
                     count: 1,
-                    counter_type: "mining".to_string(),
+                    counter_type: CounterType::Generic("mining".to_string()),
                     target: None,
                 },
             ],

@@ -15,6 +15,7 @@ use crate::types::ability::{
     AbilityDefinition, AbilityKind, Chooser, Effect, QuantityExpr, QuantityRef, StaticDefinition,
     TargetFilter,
 };
+use crate::types::counter::CounterType;
 use crate::types::zones::Zone;
 
 /// CR 608.2c + CR 701.23i: Strip a leading player-subject from a search-result
@@ -2118,8 +2119,11 @@ fn try_parse_token_enters_with_counters(lower: &str) -> Option<ContinuationAst> 
 
     // Parse counter type: "+1/+1 " is the most common
     let (rest, counter_type) = alt((
-        value("P1P1".to_string(), tag::<_, _, OracleError<'_>>("+1/+1 ")),
-        value("M1M1".to_string(), tag("-1/-1 ")),
+        value(
+            CounterType::Plus1Plus1,
+            tag::<_, _, OracleError<'_>>("+1/+1 "),
+        ),
+        value(CounterType::Minus1Minus1, tag("-1/-1 ")),
     ))
     .parse(rest)
     .ok()?;
@@ -2207,8 +2211,11 @@ fn try_parse_put_counters_on_token_followup(lower: &str) -> Option<ContinuationA
     // Parse counter type: only +1/+1 and -1/-1 are common in token contexts
     // (matches the AST scope of the existing enters-with-counters helper).
     let (rest, counter_type) = alt((
-        value("P1P1".to_string(), tag::<_, _, OracleError<'_>>("+1/+1 ")),
-        value("M1M1".to_string(), tag("-1/-1 ")),
+        value(
+            CounterType::Plus1Plus1,
+            tag::<_, _, OracleError<'_>>("+1/+1 "),
+        ),
+        value(CounterType::Minus1Minus1, tag("-1/-1 ")),
     ))
     .parse(rest)
     .ok()?;
@@ -3032,7 +3039,7 @@ mod tests {
             count,
         }) = result
         {
-            assert_eq!(counter_type, "P1P1");
+            assert_eq!(counter_type, CounterType::Plus1Plus1);
             // Should be an ObjectCount ref for "the number of other creatures you control"
             assert!(matches!(count, QuantityExpr::Ref { .. }));
         } else {
@@ -3047,7 +3054,7 @@ mod tests {
         );
         assert!(result.is_some());
         if let Some(ContinuationAst::TokenEntersWithCounters { counter_type, .. }) = result {
-            assert_eq!(counter_type, "P1P1");
+            assert_eq!(counter_type, CounterType::Plus1Plus1);
         }
     }
 
@@ -3062,7 +3069,7 @@ mod tests {
             count,
         }) = result
         {
-            assert_eq!(counter_type, "P1P1");
+            assert_eq!(counter_type, CounterType::Plus1Plus1);
             assert_eq!(count, QuantityExpr::Fixed { value: 3 });
         }
     }
@@ -3087,7 +3094,7 @@ mod tests {
             count,
         }) = result
         {
-            assert_eq!(counter_type, "P1P1");
+            assert_eq!(counter_type, CounterType::Plus1Plus1);
             // Bare X without "where X is" — resolved from parent payment at runtime.
             assert!(matches!(
                 count,
@@ -3110,7 +3117,7 @@ mod tests {
             count,
         }) = result
         {
-            assert_eq!(counter_type, "P1P1");
+            assert_eq!(counter_type, CounterType::Plus1Plus1);
             assert_eq!(count, QuantityExpr::Fixed { value: 3 });
         } else {
             panic!("expected TokenEntersWithCounters");
@@ -3127,7 +3134,7 @@ mod tests {
             count,
         }) = result
         {
-            assert_eq!(counter_type, "P1P1");
+            assert_eq!(counter_type, CounterType::Plus1Plus1);
             assert_eq!(count, QuantityExpr::Fixed { value: 1 });
         } else {
             panic!("expected TokenEntersWithCounters");
@@ -3143,7 +3150,7 @@ mod tests {
         );
         assert!(result.is_some());
         if let Some(ContinuationAst::TokenEntersWithCounters { counter_type, .. }) = result {
-            assert_eq!(counter_type, "P1P1");
+            assert_eq!(counter_type, CounterType::Plus1Plus1);
         } else {
             panic!("expected TokenEntersWithCounters");
         }
@@ -3155,7 +3162,7 @@ mod tests {
         let result = try_parse_put_counters_on_token_followup("put a -1/-1 counter on it");
         assert!(result.is_some());
         if let Some(ContinuationAst::TokenEntersWithCounters { counter_type, .. }) = result {
-            assert_eq!(counter_type, "M1M1");
+            assert_eq!(counter_type, CounterType::Minus1Minus1);
         } else {
             panic!("expected TokenEntersWithCounters");
         }

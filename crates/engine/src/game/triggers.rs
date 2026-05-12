@@ -2445,11 +2445,7 @@ pub(crate) fn check_trigger_condition(
         TriggerCondition::HadCounters { counter_type } => source_id
             .and_then(|id| state.lki_cache.get(&id))
             .is_some_and(|lki| match counter_type {
-                // Specific counter type: parse to CounterType for canonical comparison.
-                Some(ct) => {
-                    let target = crate::types::counter::parse_counter_type(ct);
-                    lki.counters.get(&target).is_some_and(|&v| v > 0)
-                }
+                Some(ct) => lki.counters.get(ct).is_some_and(|&v| v > 0),
                 // Any counter: check if any counter was present.
                 None => lki.counters.values().any(|&v| v > 0),
             }),
@@ -3264,7 +3260,7 @@ pub mod tests {
                     .execute(AbilityDefinition::new(
                         AbilityKind::Database,
                         Effect::PutCounter {
-                            counter_type: "P1P1".to_string(),
+                            counter_type: crate::types::counter::CounterType::Plus1Plus1,
                             count: QuantityExpr::Ref {
                                 qty: QuantityRef::EventContextSourcePower,
                             },
@@ -3357,7 +3353,7 @@ pub mod tests {
             },
             ability: ResolvedAbility::new(
                 Effect::PutCounter {
-                    counter_type: "P1P1".to_string(),
+                    counter_type: crate::types::counter::CounterType::Plus1Plus1,
                     count: QuantityExpr::Fixed { value: 2 },
                     target: TargetFilter::TriggeringSource,
                 },
@@ -6074,7 +6070,7 @@ pub mod tests {
                     .execute(AbilityDefinition::new(
                         AbilityKind::Spell,
                         Effect::PutCounter {
-                            counter_type: "P1P1".to_string(),
+                            counter_type: crate::types::counter::CounterType::Plus1Plus1,
                             count: QuantityExpr::Fixed { value: 2 },
                             target: TargetFilter::SelfRef,
                         },

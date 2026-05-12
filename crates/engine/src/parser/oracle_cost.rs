@@ -16,6 +16,7 @@ use crate::types::ability::{
     AbilityCost, CostReduction, FilterProp, PlayerScope, QuantityExpr, QuantityRef, TargetFilter,
     TypedFilter,
 };
+use crate::types::counter::parse_counter_type;
 use crate::types::zones::Zone;
 
 /// Parse the cost portion before `:` in an Oracle activated ability.
@@ -357,7 +358,7 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
                     .to_string();
                 return AbilityCost::RemoveCounter {
                     count: u32::MAX,
-                    counter_type,
+                    counter_type: parse_counter_type(&counter_type),
                     target: None,
                 };
             }
@@ -369,7 +370,7 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
                     .to_string();
                 return AbilityCost::RemoveCounter {
                     count,
-                    counter_type,
+                    counter_type: parse_counter_type(&counter_type),
                     target: None,
                 };
             }
@@ -379,7 +380,7 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
                 let counter_type = words[2].to_string();
                 return AbilityCost::RemoveCounter {
                     count: 1,
-                    counter_type,
+                    counter_type: parse_counter_type(&counter_type),
                     target: None,
                 };
             }

@@ -6,6 +6,7 @@ use crate::types::ability::{
     Effect, ManaProduction, ManaSpendRestriction, ModalSelectionConstraint, PaymentCost, PtValue,
     QuantityExpr, SearchSelectionConstraint, StaticDefinition, TargetFilter,
 };
+use crate::types::counter::CounterType;
 use crate::types::game_state::DistributionUnit;
 use crate::types::keywords::Keyword;
 use crate::types::mana::ManaColor;
@@ -264,7 +265,7 @@ pub(crate) enum ContinuationAst {
     /// CR 122.6a: "The token enters with X +1/+1 counters on it, where X is ..."
     /// Absorbs into the preceding Token effect by populating `enter_with_counters`.
     TokenEntersWithCounters {
-        counter_type: String,
+        counter_type: CounterType,
         count: QuantityExpr,
     },
     /// "After that turn, that player takes an extra turn." after a controlled-turn effect.
@@ -589,7 +590,7 @@ pub(crate) enum TargetedImperativeAst {
         enter_tapped: bool,
         /// CR 122.1 + CR 122.6: Counters placed on the returned object as it
         /// enters the battlefield.
-        enter_with_counters: Vec<(String, QuantityExpr)>,
+        enter_with_counters: Vec<(CounterType, QuantityExpr)>,
     },
     /// CR 400.6: Return to a specific non-hand, non-battlefield zone (zone change).
     ReturnToZone {
@@ -814,7 +815,7 @@ pub(crate) enum PutImperativeAst {
         /// CR 122.1 + CR 614.1c: Counters granted as the moved object enters
         /// (e.g., "with two additional +1/+1 counters on it"). Each entry is
         /// `(counter_type, count)`.
-        enter_with_counters: Vec<(String, QuantityExpr)>,
+        enter_with_counters: Vec<(CounterType, QuantityExpr)>,
     },
     TopOfLibrary,
     BottomOfLibrary,
@@ -922,7 +923,7 @@ pub(crate) enum ZoneCounterImperativeAst {
         all: bool,
     },
     PutCounter {
-        counter_type: String,
+        counter_type: CounterType,
         count: QuantityExpr,
         target: TargetFilter,
     },
@@ -934,25 +935,25 @@ pub(crate) enum ZoneCounterImperativeAst {
     /// Gift of the Viper, Qarsi Revenant, Nezumi Prowler, Arwen, Champion of
     /// Dusan, Quicksilver.
     PutCounterList {
-        entries: Vec<(String, QuantityExpr)>,
+        entries: Vec<(CounterType, QuantityExpr)>,
         target: TargetFilter,
         multi_target: Option<MultiTargetSpec>,
     },
     /// CR 122.1: "Put counters on each/all" — mass counter placement without targeting.
     PutCounterAll {
-        counter_type: String,
+        counter_type: CounterType,
         count: QuantityExpr,
         target: TargetFilter,
     },
     RemoveCounter {
-        counter_type: String,
+        counter_type: Option<CounterType>,
         count: i32,
         target: TargetFilter,
     },
     /// CR 122.5 / CR 122.8: Transfer counters from source to target.
     MoveCounters {
         source: TargetFilter,
-        counter_type: Option<String>,
+        counter_type: Option<CounterType>,
         count: Option<QuantityExpr>,
         mode: crate::types::ability::CounterTransferMode,
         target: TargetFilter,

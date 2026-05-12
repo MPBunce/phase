@@ -18,6 +18,7 @@ use crate::types::ability::{
 };
 use crate::types::card::CardFace;
 use crate::types::card_type::CoreType;
+use crate::types::counter::CounterType;
 use crate::types::keywords::Keyword;
 use crate::types::mana::ManaColor;
 use crate::types::phase::Phase;
@@ -765,7 +766,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
                 ObjectScope::CostPaidObject => "cost-paid object",
             };
             match counter_type {
-                Some(ct) => format!("{ct} counters on {scope_str}"),
+                Some(ct) => format!("{} counters on {scope_str}", ct.as_str()),
                 None => format!("counters on {scope_str} (any type)"),
             }
         }
@@ -773,7 +774,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             counter_type,
             filter,
         } => match counter_type {
-            Some(ct) => format!("{ct} counters on {}", fmt_target(filter)),
+            Some(ct) => format!("{} counters on {}", ct.as_str(), fmt_target(filter)),
             None => format!("counters on {}", fmt_target(filter)),
         },
         QuantityRef::Variable { name } => name.clone(),
@@ -1437,7 +1438,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         } => {
             d.push((
                 "counter".into(),
-                format!("{} {counter_type}", fmt_qty(count)),
+                format!("{} {}", fmt_qty(count), counter_type.as_str()),
             ));
             d.push(("target".into(), fmt_target(target)));
         }
@@ -1446,7 +1447,11 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             count,
             target,
         } => {
-            d.push(("counter".into(), format!("{count} {counter_type}")));
+            let counter = counter_type
+                .as_ref()
+                .map(CounterType::as_str)
+                .unwrap_or("all");
+            d.push(("counter".into(), format!("{count} {counter}")));
             d.push(("target".into(), fmt_target(target)));
         }
         Effect::MultiplyCounter {
@@ -1454,7 +1459,10 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             multiplier,
             target,
         } => {
-            d.push(("counter".into(), format!("{counter_type} ×{multiplier}")));
+            d.push((
+                "counter".into(),
+                format!("{} ×{multiplier}", counter_type.as_str()),
+            ));
             d.push(("target".into(), fmt_target(target)));
         }
         Effect::DoublePT { mode, target } => {
@@ -1744,7 +1752,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         } => {
             d.push(("source".into(), fmt_target(source)));
             if let Some(ct) = counter_type {
-                d.push(("counter".into(), ct.clone()));
+                d.push(("counter".into(), ct.as_str().to_string()));
             } else {
                 d.push(("counter".into(), "all".into()));
             }
@@ -2199,10 +2207,11 @@ fn fmt_modification(m: &crate::types::ability::ContinuousModification) -> String
             };
             match if_type {
                 Some(t) => format!(
-                    "enter with {count_str} {counter_type} counter if {}",
+                    "enter with {count_str} {} counter if {}",
+                    counter_type.as_str(),
                     fmt_core_type(t)
                 ),
-                None => format!("enter with {count_str} {counter_type} counter"),
+                None => format!("enter with {count_str} {} counter", counter_type.as_str()),
             }
         }
     }
@@ -5005,7 +5014,7 @@ fn ability_tree_any(def: &AbilityDefinition, pred: &impl Fn(&AbilityDefinition) 
     false
 }
 
-fn ability_places_counter(def: &AbilityDefinition, counter_type: &str) -> bool {
+fn ability_places_counter(def: &AbilityDefinition, counter_type: &CounterType) -> bool {
     match &*def.effect {
         Effect::PutCounter {
             counter_type: ct, ..
@@ -5546,7 +5555,7 @@ impl<'a> ParsedElement<'a> {
     }
 
     /// Check if this element has a counter effect matching the given type.
-    fn has_counter_effect(&self, counter_type: &str) -> bool {
+    fn has_counter_effect(&self, counter_type: &CounterType) -> bool {
         let counter_pred =
             |def: &AbilityDefinition| -> bool { ability_places_counter(def, counter_type) };
         match self {
@@ -8208,7 +8217,7 @@ mod tests {
             AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::PutCounter {
-                    counter_type: "P1P1".to_string(),
+                    counter_type: CounterType::Plus1Plus1,
                     count: QuantityExpr::Ref {
                         qty: QuantityRef::Speed,
                     },
@@ -8386,7 +8395,7 @@ mod tests {
                     supertypes: vec![],
                     static_abilities: vec![],
                     enter_with_counters: vec![(
-                        "P1P1".to_string(),
+                        CounterType::Plus1Plus1,
                         QuantityExpr::Ref {
                             qty: QuantityRef::Variable {
                                 name: "X".to_string(),

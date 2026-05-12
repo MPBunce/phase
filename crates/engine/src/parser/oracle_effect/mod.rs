@@ -54,6 +54,7 @@ use crate::types::ability::{
     UntilCondition,
 };
 use crate::types::card_type::{CoreType, Supertype};
+use crate::types::counter::CounterType;
 use crate::types::game_state::{DistributionUnit, NextSpellModifier, RetargetScope};
 use crate::types::identifiers::{ObjectId, TrackedSetId};
 use crate::types::keywords::Keyword;
@@ -888,12 +889,15 @@ fn try_parse_conditional_damage_prevention_with_followup(text: &str) -> Option<P
     let counter_followup: Option<AbilityDefinition> =
         if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(" and put that many ").parse(rest) {
             let (rest, counter_type) = alt((
-                value("P1P1", tag::<_, _, OracleError<'_>>("+1/+1")),
-                value("P0P1", tag("+0/+1")),
-                value("P1P0", tag("+1/+0")),
-                value("M1M1", tag("-1/-1")),
-                value("P0P2", tag("+0/+2")),
-                value("P2P0", tag("+2/+0")),
+                value(
+                    CounterType::Plus1Plus1,
+                    tag::<_, _, OracleError<'_>>("+1/+1"),
+                ),
+                value(CounterType::Generic("+0/+1".to_string()), tag("+0/+1")),
+                value(CounterType::Generic("+1/+0".to_string()), tag("+1/+0")),
+                value(CounterType::Minus1Minus1, tag("-1/-1")),
+                value(CounterType::Generic("+0/+2".to_string()), tag("+0/+2")),
+                value(CounterType::Generic("+2/+0".to_string()), tag("+2/+0")),
             ))
             .parse(rest)
             .ok()?;
@@ -932,7 +936,7 @@ fn try_parse_conditional_damage_prevention_with_followup(text: &str) -> Option<P
                 ..AbilityDefinition::new(
                     AbilityKind::Spell,
                     Effect::PutCounter {
-                        counter_type: counter_type.to_string(),
+                        counter_type,
                         count: QuantityExpr::Fixed { value: 1 },
                         target: counter_target,
                     },
@@ -1020,8 +1024,11 @@ fn try_parse_enters_with_additional_counters(lower: &str) -> Option<AbilityDefin
 
     // Parse counter type: "+1/+1 counter" or "-1/-1 counter" etc.
     let (rest, counter_type) = alt((
-        value("P1P1".to_string(), tag::<_, _, OracleError<'_>>("+1/+1")),
-        value("M1M1".to_string(), tag("-1/-1")),
+        value(
+            CounterType::Plus1Plus1,
+            tag::<_, _, OracleError<'_>>("+1/+1"),
+        ),
+        value(CounterType::Minus1Minus1, tag("-1/-1")),
     ))
     .parse(rest)
     .ok()?;
@@ -1648,7 +1655,7 @@ fn try_parse_earthbend_clause(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
     let put_counters = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::PutCounter {
-            counter_type: "P1P1".to_string(),
+            counter_type: CounterType::Plus1Plus1,
             count: counter_count,
             target: TargetFilter::ParentTarget,
         },
@@ -4216,14 +4223,9 @@ fn try_parse_for_each_effect(text: &str, ctx: &mut ParseContext) -> Option<Parse
         .map(|(rest, _)| rest)
         .unwrap_or(before)
         .trim();
-        // Parse through the typed combinator so the canonical mapping lives in
-        // `types::counter::parse_counter_type`. `Effect::PutCounter::counter_type`
-        // remains `String` (serialization format), so emit the canonical
-        // `as_str()` form rather than the raw Oracle token.
-        let (_, counter_type_enum) = nom_primitives::parse_counter_type_typed
+        let (_, counter_type) = nom_primitives::parse_counter_type_typed
             .parse(ct_start)
             .ok()?;
-        let counter_type = counter_type_enum.as_str().to_string();
         let counter_on_end = before.len() + "counter on ".len();
         let after_counter_on = base_tp.original[counter_on_end..].trim();
         // Strip clause separators (", then") that leak into the counter target text.
@@ -11897,7 +11899,7 @@ struct ReturnDestination {
     // CR 614.1: "tapped" — enters the battlefield tapped.
     enter_tapped: bool,
     // CR 122.1 + CR 122.6: Counters placed on the returned object as it enters.
-    enter_with_counters: Vec<(String, QuantityExpr)>,
+    enter_with_counters: Vec<(CounterType, QuantityExpr)>,
 }
 
 /// Detect "return ... to <zone>" destination phrase, including "transformed" flag.
@@ -13213,7 +13215,7 @@ fn parse_signed_pt_component(text: &str) -> Option<PtValue> {
 
 /// CR 122.1 + CR 614.1c: Scan a remainder for a "with [N] [type] counter(s) on
 /// it" suffix and lift the matched counter type + count into a
-/// `Vec<(String, QuantityExpr)>` slot for `Effect::ChangeZone.enter_with_counters`.
+/// `Vec<(CounterType, QuantityExpr)>` slot for `Effect::ChangeZone.enter_with_counters`.
 ///
 /// Matches the patterns:
 ///   * "with N <type> counter(s) on it" — fixed numeric (digits or English).
@@ -13230,7 +13232,7 @@ fn parse_signed_pt_component(text: &str) -> Option<PtValue> {
 /// two additional +1/+1 counters on it") without the caller having to
 /// pre-trim. The body combinator gates on `tag("with ")` then dispatches to
 /// `parse_counter_suffix_body`.
-fn parse_with_counters_suffix(lower: &str) -> Vec<(String, QuantityExpr)> {
+fn parse_with_counters_suffix(lower: &str) -> Vec<(CounterType, QuantityExpr)> {
     nom_primitives::scan_preceded(lower, |i| {
         let (i, _) = tag::<_, _, OracleError<'_>>("with ").parse(i)?;
         parse_counter_suffix_body_combinator(i)
@@ -13247,7 +13249,7 @@ fn parse_with_counters_suffix(lower: &str) -> Vec<(String, QuantityExpr)> {
 /// Returns the parsed `(counter_type, count)` pair on success.
 pub(crate) fn parse_counter_suffix_body_combinator(
     input: &str,
-) -> nom::IResult<&str, (String, QuantityExpr), OracleError<'_>> {
+) -> nom::IResult<&str, (CounterType, QuantityExpr), OracleError<'_>> {
     // Count: digits, English word, or article ("a"/"an").
     let (rest, count) = nom_primitives::parse_number.parse(input)?;
     let (rest, _) = tag(" ").parse(rest)?;
@@ -13260,9 +13262,7 @@ pub(crate) fn parse_counter_suffix_body_combinator(
     // accepts any non-whitespace name (including "+1/+1") followed by inline
     // tokens that don't terminate at " counter".
     let (rest, type_token) = take_until(" counter").parse(rest)?;
-    let counter_type = crate::types::counter::parse_counter_type(type_token)
-        .as_str()
-        .to_string();
+    let counter_type = crate::types::counter::parse_counter_type(type_token);
     let (rest, _) = tag(" counter").parse(rest)?;
     // Optional plural "s".
     let (rest, _) = nom::combinator::opt(tag::<_, _, OracleError<'_>>("s")).parse(rest)?;
@@ -15960,7 +15960,7 @@ mod tests {
                 ref counter_type,
                 multiplier: 2,
                 target: TargetFilter::SelfRef,
-            } if counter_type == "P1P1"
+            } if *counter_type == CounterType::Plus1Plus1
         ));
     }
 
@@ -18056,7 +18056,7 @@ mod tests {
                     counter_type: ref ct,
                     count: QuantityExpr::Fixed { value: 1 },
                     target: TargetFilter::Typed(_),
-                } if ct == "P1P1"
+                } if *ct == CounterType::Plus1Plus1
             ),
             "Expected targeted PutCounter with multi_target, got {:?}",
             clause.effect
@@ -18381,7 +18381,7 @@ mod tests {
     fn put_counter_this_creature_is_self_ref() {
         let e = parse_effect("put a +1/+1 counter on this creature");
         assert!(
-            matches!(e, Effect::PutCounter { counter_type: ref ct, count: QuantityExpr::Fixed { value: 1 }, target: TargetFilter::SelfRef } if ct == "P1P1")
+            matches!(e, Effect::PutCounter { counter_type: ref ct, count: QuantityExpr::Fixed { value: 1 }, target: TargetFilter::SelfRef } if *ct == CounterType::Plus1Plus1)
         );
     }
 
@@ -18395,7 +18395,7 @@ mod tests {
                     counter_type: ref ct,
                     count: QuantityExpr::Fixed { value: 1 },
                     ..
-                } if ct == "P1P1"
+                } if *ct == CounterType::Plus1Plus1
             ),
             "Expected PutCounterAll for 'each creature you control', got {:?}",
             e
@@ -22032,7 +22032,7 @@ mod tests {
                 count,
                 target,
             } => {
-                assert_eq!(counter_type, "P1P1");
+                assert_eq!(counter_type, CounterType::Plus1Plus1);
                 // "that many" resolves to EventContextAmount at runtime
                 assert!(matches!(
                     count,
@@ -22055,7 +22055,7 @@ mod tests {
                 count,
                 target,
             } => {
-                assert_eq!(counter_type, "charge");
+                assert_eq!(counter_type, CounterType::Generic("charge".to_string()));
                 assert!(matches!(
                     count,
                     QuantityExpr::Ref {
@@ -24569,7 +24569,7 @@ mod tests {
                 count,
                 target,
             } => {
-                assert_eq!(counter_type, "P1P1");
+                assert_eq!(counter_type, &CounterType::Plus1Plus1);
                 assert_eq!(*count, QuantityExpr::Fixed { value: 1 });
                 assert_eq!(*target, TargetFilter::ParentTarget);
             }
@@ -24619,7 +24619,7 @@ mod tests {
                 count,
                 target,
             } => {
-                assert_eq!(counter_type, "P1P1");
+                assert_eq!(counter_type, &CounterType::Plus1Plus1);
                 assert_eq!(*count, QuantityExpr::Fixed { value: 1 });
                 assert_eq!(*target, TargetFilter::ParentTarget);
             }
@@ -28069,7 +28069,7 @@ mod tests {
                 assert!(enter_tapped);
                 assert_eq!(
                     enter_with_counters,
-                    vec![("P1P1".to_string(), QuantityExpr::Fixed { value: 2 })]
+                    vec![(CounterType::Plus1Plus1, QuantityExpr::Fixed { value: 2 })]
                 );
             }
             other => panic!("expected ChangeZone, got {other:?}"),
@@ -28100,7 +28100,10 @@ mod tests {
                 assert!(!under_your_control);
                 assert_eq!(
                     enter_with_counters,
-                    vec![("finality".to_string(), QuantityExpr::Fixed { value: 1 })]
+                    vec![(
+                        CounterType::Generic("finality".to_string()),
+                        QuantityExpr::Fixed { value: 1 },
+                    )]
                 );
             }
             other => panic!("expected ChangeZone, got {other:?}"),
@@ -28979,7 +28982,10 @@ mod snapshot_tests {
         };
         assert_eq!(
             enter_with_counters,
-            &vec![("finality".to_string(), QuantityExpr::Fixed { value: 1 })]
+            &vec![(
+                CounterType::Generic("finality".to_string()),
+                QuantityExpr::Fixed { value: 1 },
+            )]
         );
 
         let subtype_followup = def.sub_ability.as_ref().expect("expected subtype followup");
@@ -29139,7 +29145,10 @@ mod snapshot_tests {
         assert!(!*under_your_control);
         assert_eq!(
             enter_with_counters,
-            &vec![("finality".to_string(), QuantityExpr::Fixed { value: 1 })]
+            &vec![(
+                CounterType::Generic("finality".to_string()),
+                QuantityExpr::Fixed { value: 1 },
+            )]
         );
     }
 

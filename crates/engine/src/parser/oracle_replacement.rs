@@ -1579,7 +1579,7 @@ fn parse_for_each_convoked_creature_clause(
     ))
 }
 
-fn parse_enters_counter_entries(after_with: &str) -> Option<Vec<(String, QuantityExpr)>> {
+fn parse_enters_counter_entries(after_with: &str) -> Option<Vec<(CounterType, QuantityExpr)>> {
     let mut remaining = after_with;
     let mut entries = Vec::new();
 
@@ -1641,7 +1641,7 @@ fn parse_enters_counter_separator(input: &str) -> Option<&str> {
     Some(after_sep)
 }
 
-fn build_enters_counter_ability(entries: Vec<(String, QuantityExpr)>) -> AbilityDefinition {
+fn build_enters_counter_ability(entries: Vec<(CounterType, QuantityExpr)>) -> AbilityDefinition {
     let mut chain = entries
         .into_iter()
         .rev()
@@ -1748,8 +1748,11 @@ fn parse_whenever_you_cast_enters_with(
 
     // Counter type.
     let (rest, counter_type) = alt((
-        value("P1P1".to_string(), tag::<_, _, OracleError<'_>>("+1/+1")),
-        value("M1M1".to_string(), tag("-1/-1")),
+        value(
+            CounterType::Plus1Plus1,
+            tag::<_, _, OracleError<'_>>("+1/+1"),
+        ),
+        value(CounterType::Minus1Minus1, tag("-1/-1")),
     ))
     .parse(rest)
     .ok()?;
@@ -2254,7 +2257,7 @@ fn parse_damage_history_source(input: &str) -> Option<(&str, TargetFilter)> {
 struct ExileAnaphorMatch<'a> {
     continuation: TextPair<'a>,
     matched: bool,
-    enter_with_counters: Vec<(String, QuantityExpr)>,
+    enter_with_counters: Vec<(CounterType, QuantityExpr)>,
 }
 
 fn parse_exile_anaphor_clause<'a>(input: TextPair<'a>) -> ExileAnaphorMatch<'a> {
@@ -2285,7 +2288,7 @@ fn parse_exile_anaphor_clause<'a>(input: TextPair<'a>) -> ExileAnaphorMatch<'a> 
     // Then suffix form:    "exile <anaphor> [with N counters on it] instead".
     // The body shape is unified: the `with-counters` slot is optional in both
     // word orders.
-    let parsed: nom::IResult<&str, Option<(String, QuantityExpr)>, OracleError<'_>> = alt((
+    let parsed: nom::IResult<&str, Option<(CounterType, QuantityExpr)>, OracleError<'_>> = alt((
         // Prefix: "instead exile <anaphor> [with N counter(s) on it]"
         preceded(
             tag("instead "),
@@ -4425,7 +4428,7 @@ mod tests {
                 assert_eq!(*destination, Zone::Battlefield);
                 assert_eq!(
                     enter_with_counters,
-                    &vec![("P1P1".to_string(), QuantityExpr::Fixed { value: 2 })]
+                    &vec![(CounterType::Plus1Plus1, QuantityExpr::Fixed { value: 2 })]
                 );
             }
             other => panic!("expected ChangeZone, got {other:?}"),
@@ -4456,7 +4459,7 @@ mod tests {
                     qty: QuantityRef::EventContextAmount
                 },
                 target: TargetFilter::SelfRef,
-            } if counter_type == "P1P1"
+            } if *counter_type == CounterType::Plus1Plus1
         ));
     }
 
@@ -4478,7 +4481,7 @@ mod tests {
                     qty: QuantityRef::EventContextAmount
                 },
                 target: TargetFilter::SelfRef,
-            } if counter_type == "delay"
+            } if *counter_type == CounterType::Generic("delay".to_string())
         ));
     }
 
@@ -4558,7 +4561,7 @@ mod tests {
                 ref counter_type,
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::ParentTarget,
-            } if counter_type == "P1P1"
+            } if *counter_type == CounterType::Plus1Plus1
         ));
     }
 
@@ -5280,7 +5283,7 @@ mod tests {
                 ref counter_type,
                 count: QuantityExpr::Fixed { value: 12 },
                 ..
-            } if counter_type == "P1P1"
+            } if *counter_type == CounterType::Plus1Plus1
         ));
     }
 
@@ -5330,7 +5333,7 @@ mod tests {
                     }
                 },
                 target: TargetFilter::SelfRef,
-            } if counter_type == "P1P1"
+            } if *counter_type == CounterType::Plus1Plus1
                 && card_types.contains(&TypeFilter::Creature)
         ));
     }
@@ -5353,7 +5356,7 @@ mod tests {
                     ref inner,
                 },
                 target: TargetFilter::SelfRef,
-            } if counter_type == "P1P1"
+            } if *counter_type == CounterType::Plus1Plus1
                 && matches!(**inner, QuantityExpr::Ref { qty: QuantityRef::ConvokedCreatureCount })
         ));
     }
@@ -5376,7 +5379,7 @@ mod tests {
                     ref inner,
                 },
                 target: TargetFilter::SelfRef,
-            } if counter_type == "P1P1"
+            } if *counter_type == CounterType::Plus1Plus1
                 && matches!(**inner, QuantityExpr::Ref { qty: QuantityRef::ManaSpentToCast { scope: crate::types::ability::CastManaObjectScope::SelfObject, metric: crate::types::ability::CastManaSpentMetric::DistinctColors } })
         ));
     }
@@ -5398,7 +5401,7 @@ mod tests {
                     qty: QuantityRef::ManaSpentToCast { scope: crate::types::ability::CastManaObjectScope::SelfObject, metric: crate::types::ability::CastManaSpentMetric::Total },
                 },
                 target: TargetFilter::SelfRef,
-            } if counter_type == "P1P1"
+            } if *counter_type == CounterType::Plus1Plus1
         ));
     }
 
@@ -5419,7 +5422,7 @@ mod tests {
                     qty: QuantityRef::ManaSpentToCast { scope: crate::types::ability::CastManaObjectScope::SelfObject, metric: crate::types::ability::CastManaSpentMetric::Total },
                 },
                 target: TargetFilter::SelfRef,
-            } if counter_type == "P1P1"
+            } if *counter_type == CounterType::Plus1Plus1
         ));
     }
 
@@ -5440,7 +5443,7 @@ mod tests {
                     qty: QuantityRef::ManaSpentToCast { scope: crate::types::ability::CastManaObjectScope::SelfObject, metric: crate::types::ability::CastManaSpentMetric::Total },
                 },
                 target: TargetFilter::SelfRef,
-            } if counter_type == "P1P1"
+            } if *counter_type == CounterType::Plus1Plus1
         ));
     }
 
@@ -5453,7 +5456,12 @@ mod tests {
         .unwrap();
 
         let mut cursor = def.execute.as_deref().expect("execute ability");
-        let expected = ["P1P1", "flying", "deathtouch", "shield"];
+        let expected = [
+            CounterType::Plus1Plus1,
+            CounterType::Keyword(crate::types::keywords::KeywordKind::Flying),
+            CounterType::Keyword(crate::types::keywords::KeywordKind::Deathtouch),
+            CounterType::Generic("shield".to_string()),
+        ];
         for counter in expected {
             assert!(matches!(
                 *cursor.effect,
@@ -5461,9 +5469,9 @@ mod tests {
                     ref counter_type,
                     count: QuantityExpr::Fixed { value: 1 },
                     target: TargetFilter::SelfRef,
-                } if counter_type == counter
+                } if *counter_type == counter
             ));
-            if counter == "shield" {
+            if counter == CounterType::Generic("shield".to_string()) {
                 assert!(cursor.sub_ability.is_none());
             } else {
                 cursor = cursor.sub_ability.as_deref().expect("next counter");
@@ -5487,7 +5495,7 @@ mod tests {
                 count,
                 ..
             } => {
-                assert_eq!(counter_type, "charge");
+                assert_eq!(counter_type, &CounterType::Generic("charge".to_string()));
                 assert!(
                     matches!(
                         count,
@@ -5515,7 +5523,7 @@ mod tests {
                 count,
                 ..
             } => {
-                assert_eq!(counter_type, "P1P1");
+                assert_eq!(counter_type, &CounterType::Plus1Plus1);
                 assert!(
                     matches!(
                         count,
@@ -5545,7 +5553,7 @@ mod tests {
                 count,
                 ..
             } => {
-                assert_eq!(counter_type, "P1P1");
+                assert_eq!(counter_type, &CounterType::Plus1Plus1);
                 assert!(matches!(
                     count,
                     QuantityExpr::Ref {
@@ -5572,7 +5580,7 @@ mod tests {
                 count,
                 ..
             } => {
-                assert_eq!(counter_type, "P1P1");
+                assert_eq!(counter_type, &CounterType::Plus1Plus1);
                 match count {
                     QuantityExpr::Multiply { factor, inner } => {
                         assert_eq!(*factor, 2);
@@ -5605,7 +5613,7 @@ mod tests {
                 count,
                 ..
             } => {
-                assert_eq!(counter_type, "P1P1");
+                assert_eq!(counter_type, &CounterType::Plus1Plus1);
                 match count {
                     QuantityExpr::DivideRounded {
                         inner,
@@ -5642,7 +5650,11 @@ mod tests {
                 count,
                 ..
             } => {
-                assert_eq!(counter_type, "P1P1", "counter type should be P1P1");
+                assert_eq!(
+                    counter_type,
+                    &CounterType::Plus1Plus1,
+                    "counter type should be P1P1"
+                );
                 assert!(
                     matches!(
                         count,
@@ -5672,7 +5684,7 @@ mod tests {
                 ref counter_type,
                 count: QuantityExpr::Fixed { value: 1 },
                 ..
-            } if counter_type == "P1P1"
+            } if *counter_type == CounterType::Plus1Plus1
         ));
         // valid_card should filter for other creatures you control of chosen type
         match &def.valid_card {
@@ -5702,7 +5714,7 @@ mod tests {
                 ref counter_type,
                 count: QuantityExpr::Fixed { value: 1 },
                 ..
-            } if counter_type == "P1P1"
+            } if *counter_type == CounterType::Plus1Plus1
         ));
         match &def.valid_card {
             Some(TargetFilter::Typed(tf)) => {
@@ -5737,7 +5749,7 @@ mod tests {
                 ref counter_type,
                 count: QuantityExpr::Fixed { value: 3 },
                 ..
-            } if counter_type == "P1P1"
+            } if *counter_type == CounterType::Plus1Plus1
         ));
         assert_eq!(def.condition, Some(ReplacementCondition::CastViaEscape));
     }
@@ -5756,7 +5768,7 @@ mod tests {
                 ref counter_type,
                 count: QuantityExpr::Fixed { value: 1 },
                 ..
-            } if counter_type == "P1P1"
+            } if *counter_type == CounterType::Plus1Plus1
         ));
         assert_eq!(def.condition, Some(ReplacementCondition::CastViaEscape));
     }
@@ -5778,7 +5790,7 @@ mod tests {
                 ref counter_type,
                 count: QuantityExpr::Fixed { value: 1 },
                 ..
-            } if counter_type == "P1P1"
+            } if *counter_type == CounterType::Plus1Plus1
         ));
         assert!(matches!(
             def.condition,
@@ -5805,7 +5817,7 @@ mod tests {
                 ref counter_type,
                 count: QuantityExpr::Fixed { value: 2 },
                 ..
-            } if counter_type == "P1P1"
+            } if *counter_type == CounterType::Plus1Plus1
         ));
         // CR 702.33d + CR 702.33f: per-variant resolution is deferred, but the
         // parser keeps typed cost metadata so synthesis can map it to the card's
@@ -5837,7 +5849,7 @@ mod tests {
                     qty: QuantityRef::KickerCount
                 },
                 ..
-            } if counter_type == "P1P1"
+            } if *counter_type == CounterType::Plus1Plus1
         ));
     }
 
@@ -6118,7 +6130,10 @@ mod tests {
                 assert!(matches!(target, TargetFilter::SelfRef));
                 assert_eq!(
                     enter_with_counters,
-                    &vec![("ice".to_string(), QuantityExpr::Fixed { value: 1 })]
+                    &vec![(
+                        CounterType::Generic("ice".to_string()),
+                        QuantityExpr::Fixed { value: 1 },
+                    )]
                 );
             }
             other => panic!("expected ChangeZone, got {other:?}"),
@@ -6153,7 +6168,10 @@ mod tests {
                 assert!(matches!(target, TargetFilter::SelfRef));
                 assert_eq!(
                     enter_with_counters,
-                    &vec![("egg".to_string(), QuantityExpr::Fixed { value: 3 })]
+                    &vec![(
+                        CounterType::Generic("egg".to_string()),
+                        QuantityExpr::Fixed { value: 3 },
+                    )]
                 );
             }
             other => panic!("expected ChangeZone, got {other:?}"),
@@ -7762,7 +7780,7 @@ mod tests {
         else {
             panic!("expected PutCounter, got {:?}", exec.effect);
         };
-        assert_eq!(counter_type, "P1P1");
+        assert_eq!(counter_type, &CounterType::Plus1Plus1);
         assert_eq!(target, &TargetFilter::SelfRef);
         assert_eq!(
             count,

@@ -3,6 +3,7 @@ use crate::types::ability::{
     AbilityDefinition, Effect, PostReplacementContinuation, ResolvedAbility, TargetFilter,
     TargetRef,
 };
+use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
 use crate::types::identifiers::ObjectId;
@@ -706,7 +707,7 @@ fn apply_pending_spell_resolution(
 pub(super) fn apply_etb_counters(
     state: &mut GameState,
     object_id: ObjectId,
-    counters: &[(String, u32)],
+    counters: &[(CounterType, u32)],
     events: &mut Vec<GameEvent>,
 ) {
     let actor = state
@@ -714,10 +715,14 @@ pub(super) fn apply_etb_counters(
         .get(&object_id)
         .map(|obj| obj.controller)
         .unwrap_or(PlayerId(0));
-    for (counter_type_str, count) in counters {
-        let ct = crate::types::counter::parse_counter_type(counter_type_str);
+    for (counter_type, count) in counters {
         super::effects::counters::add_counter_with_replacement(
-            state, actor, object_id, ct, *count, events,
+            state,
+            actor,
+            object_id,
+            counter_type.clone(),
+            *count,
+            events,
         );
     }
 }

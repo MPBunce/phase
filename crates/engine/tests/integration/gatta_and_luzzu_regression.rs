@@ -60,7 +60,7 @@ fn build_gatta_prevention_chain(
 ) -> ResolvedAbility {
     let mut counter_rider = ResolvedAbility::new(
         Effect::PutCounter {
-            counter_type: "P1P1".to_string(),
+            counter_type: CounterType::Plus1Plus1,
             count: QuantityExpr::Fixed { value: 1 },
             target: TargetFilter::ParentTarget,
         },

@@ -2,6 +2,7 @@ use engine::game::game_object::GameObject;
 use engine::types::ability::{
     ContinuousModification, Effect, PtValue, QuantityExpr, TargetFilter, TypeFilter,
 };
+use engine::types::counter::CounterType;
 use engine::types::player::PlayerId;
 use engine::types::statics::StaticMode;
 use engine::types::triggers::TriggerMode;
@@ -32,13 +33,11 @@ fn invert(polarity: EffectPolarity) -> EffectPolarity {
 /// CR 122.1: Counters sign — `+1/+1` is beneficial to the bearer, `-1/-1`
 /// harmful. Non-P/T counter types (poison, loyalty, charge, etc.) are classified
 /// as Contextual because their value to the bearer depends on card semantics.
-fn counter_sign_polarity(counter_type: &str) -> EffectPolarity {
-    if counter_type.starts_with('+') {
-        EffectPolarity::Beneficial
-    } else if counter_type.starts_with('-') {
-        EffectPolarity::Harmful
-    } else {
-        EffectPolarity::Contextual
+fn counter_sign_polarity(counter_type: &CounterType) -> EffectPolarity {
+    match counter_type {
+        CounterType::Plus1Plus1 => EffectPolarity::Beneficial,
+        CounterType::Minus1Minus1 => EffectPolarity::Harmful,
+        _ => EffectPolarity::Contextual,
     }
 }
 
@@ -70,7 +69,11 @@ pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
         // removing a +1/+1 counter harms the bearer, removing a -1/-1 counter
         // helps it (Hexcaster's Mark, Solemnity-style interactions, Vampire
         // Hexmage). Same building-block class as PutCounter, opposite sign.
-        Effect::RemoveCounter { counter_type, .. } => invert(counter_sign_polarity(counter_type)),
+        Effect::RemoveCounter { counter_type, .. } => counter_type
+            .as_ref()
+            .map(counter_sign_polarity)
+            .map(invert)
+            .unwrap_or(EffectPolarity::Contextual),
         Effect::MultiplyCounter {
             counter_type,
             multiplier,

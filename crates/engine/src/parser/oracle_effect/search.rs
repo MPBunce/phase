@@ -25,6 +25,8 @@ use crate::types::ability::{
     TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::{CoreType, Supertype};
+#[cfg(test)]
+use crate::types::counter::CounterType;
 use crate::types::keywords::Keyword;
 use crate::types::zones::Zone;
 
@@ -3702,7 +3704,7 @@ mod tests {
                         counter_type: Some(counter_type),
                     },
                 },
-            } if counter_type == "charge"
+            } if *counter_type == CounterType::Generic("charge".to_string())
         )));
         assert!(filter.properties.iter().any(|prop| matches!(
             prop,

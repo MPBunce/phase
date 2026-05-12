@@ -19,7 +19,7 @@ use crate::types::ability::{
     QuantityRef, ResolvedAbility, RoundingMode, TargetFilter, TargetRef, TypeFilter, ZoneRef,
 };
 use crate::types::card_type::CoreType;
-use crate::types::counter::{parse_counter_type, CounterType};
+use crate::types::counter::CounterType;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
 use crate::types::mana::{ManaColor, ManaCost};
@@ -725,14 +725,7 @@ fn resolve_ref(
         QuantityRef::CountersOn {
             scope,
             counter_type,
-        } => resolve_counters_on_scope(
-            state,
-            *scope,
-            ctx,
-            targets,
-            ability,
-            counter_type.as_deref(),
-        ),
+        } => resolve_counters_on_scope(state, *scope, ctx, targets, ability, counter_type.as_ref()),
         // CR 107.3a + CR 601.2b + CR 107.3i: "X" resolves to the value chosen at
         // cast time, carried on the resolving ability's `chosen_x`
         // (CR 601.2b announcement; CR 107.3i makes all instances share the value).
@@ -889,7 +882,6 @@ fn resolve_ref(
             // CR 122.1: When `counter_type` is `None`, sum across every counter type
             // (e.g., "counters among artifacts and creatures you control"). When
             // `Some`, count only that specific counter type.
-            let ct = counter_type.as_deref().map(parse_counter_type);
             let zone = filter
                 .extract_in_zone()
                 .unwrap_or(crate::types::zones::Zone::Battlefield);
@@ -897,7 +889,7 @@ fn resolve_ref(
                 .iter()
                 .filter_map(|&id| {
                     if matches_target_filter(state, id, filter, &filter_ctx) {
-                        state.objects.get(&id).map(|obj| match &ct {
+                        state.objects.get(&id).map(|obj| match counter_type {
                             Some(ct) => {
                                 u32_to_i32_saturating(obj.counters.get(ct).copied().unwrap_or(0))
                             }
@@ -1870,12 +1862,12 @@ fn object_id_for_scope(
     }
 }
 
-fn counter_count_from_map(counters: &HashMap<CounterType, u32>, counter_type: Option<&str>) -> i32 {
+fn counter_count_from_map(
+    counters: &HashMap<CounterType, u32>,
+    counter_type: Option<&CounterType>,
+) -> i32 {
     match counter_type {
-        Some(ct) => {
-            let kind = parse_counter_type(ct);
-            u32_to_i32_saturating(counters.get(&kind).copied().unwrap_or(0))
-        }
+        Some(ct) => u32_to_i32_saturating(counters.get(ct).copied().unwrap_or(0)),
         None => u32_to_i32_saturating(counters.values().copied().sum::<u32>()),
     }
 }
@@ -1886,7 +1878,7 @@ fn resolve_counters_on_scope(
     ctx: QuantityContext,
     targets: &[TargetRef],
     ability: Option<&ResolvedAbility>,
-    counter_type: Option<&str>,
+    counter_type: Option<&CounterType>,
 ) -> i32 {
     match scope {
         // CR 122.2 + CR 400.7 + CR 603.10a: When the source or triggering
@@ -4160,7 +4152,7 @@ mod tests {
 
         let expr = QuantityExpr::Ref {
             qty: QuantityRef::CountersOnObjects {
-                counter_type: Some("P1P1".to_string()),
+                counter_type: Some(CounterType::Plus1Plus1),
                 filter: TargetFilter::Typed(TypedFilter::land().controller(ControllerRef::You)),
             },
         };
@@ -4485,7 +4477,7 @@ mod tests {
         let expr = QuantityExpr::Ref {
             qty: QuantityRef::CountersOn {
                 scope: ObjectScope::Source,
-                counter_type: Some("loyalty".to_string()),
+                counter_type: Some(CounterType::Loyalty),
             },
         };
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), source), 4);
@@ -4514,7 +4506,7 @@ mod tests {
         let expr = QuantityExpr::Ref {
             qty: QuantityRef::CountersOn {
                 scope: ObjectScope::Source,
-                counter_type: Some("charge".to_string()),
+                counter_type: Some(CounterType::Generic("charge".to_string())),
             },
         };
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), source), 3);
@@ -4556,7 +4548,7 @@ mod tests {
         let expr = QuantityExpr::Ref {
             qty: QuantityRef::CountersOn {
                 scope: ObjectScope::EventSource,
-                counter_type: Some("charge".to_string()),
+                counter_type: Some(CounterType::Generic("charge".to_string())),
             },
         };
         let ability = crate::types::ability::ResolvedAbility::new(

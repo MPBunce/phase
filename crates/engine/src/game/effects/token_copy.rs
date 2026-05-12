@@ -5,6 +5,8 @@ use crate::game::{targeting, zones};
 use crate::types::ability::{
     ContinuousModification, Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter,
 };
+#[cfg(test)]
+use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::{CardId, ObjectId};
@@ -339,9 +341,13 @@ fn apply_token_modifications(
                 if !gate_passes {
                     continue;
                 }
-                let ct = crate::types::counter::parse_counter_type(counter_type);
                 super::counters::add_counter_with_replacement(
-                    state, controller, token_id, ct, n, events,
+                    state,
+                    controller,
+                    token_id,
+                    counter_type.clone(),
+                    n,
+                    events,
                 );
             }
             // CR 707.9b: Name override applied at copy time.
@@ -1027,7 +1033,7 @@ mod tests {
                 count: QuantityExpr::Fixed { value: 1 },
                 extra_keywords: vec![],
                 additional_modifications: vec![ContinuousModification::AddCounterOnEnter {
-                    counter_type: "P1P1".to_string(),
+                    counter_type: CounterType::Plus1Plus1,
                     count: QuantityExpr::Fixed { value: 1 },
                     if_type: None,
                 }],
@@ -1092,7 +1098,7 @@ mod tests {
                 count: QuantityExpr::Fixed { value: 1 },
                 extra_keywords: vec![],
                 additional_modifications: vec![ContinuousModification::AddCounterOnEnter {
-                    counter_type: "P1P1".to_string(),
+                    counter_type: CounterType::Plus1Plus1,
                     count: QuantityExpr::Fixed { value: 1 },
                     if_type: Some(CoreType::Creature),
                 }],

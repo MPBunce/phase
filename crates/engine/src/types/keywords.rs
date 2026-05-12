@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use super::ability::{
     AbilityCost, ControllerRef, FilterProp, QuantityExpr, TargetFilter, TypedFilter,
 };
+use super::counter::{parse_counter_type, CounterType};
 use super::mana::{ManaColor, ManaCost};
 
 /// CR 702.34a: Flashback cost — either a mana cost or a non-mana cost
@@ -421,7 +422,7 @@ pub enum Keyword {
 
     // ETB counter (e.g., P1P1:1)
     EtbCounter {
-        counter_type: String,
+        counter_type: CounterType,
         count: u32,
     },
 
@@ -1215,13 +1216,13 @@ fn parse_enchant_target(s: &str) -> TargetFilter {
 }
 
 /// Parse an EtbCounter parameter string (e.g., "P1P1:1") into counter_type and count.
-fn parse_etb_counter(s: &str) -> (String, u32) {
+fn parse_etb_counter(s: &str) -> (CounterType, u32) {
     if let Some(idx) = s.rfind(':') {
-        let counter_type = s[..idx].to_string();
+        let counter_type = parse_counter_type(&s[..idx]);
         let count = s[idx + 1..].parse::<u32>().unwrap_or(1);
         (counter_type, count)
     } else {
-        (s.to_string(), 1)
+        (parse_counter_type(s), 1)
     }
 }
 
@@ -1924,8 +1925,8 @@ fn keyword_from_tagged(variant: &str, data: &serde_json::Value) -> Result<Keywor
             let counter_type = obj
                 .get("counter_type")
                 .and_then(|v| v.as_str())
-                .unwrap_or("P1P1")
-                .to_string();
+                .map(parse_counter_type)
+                .unwrap_or(CounterType::Plus1Plus1);
             let count = obj.get("count").and_then(|v| v.as_u64()).unwrap_or(1) as u32;
             Ok(Keyword::EtbCounter {
                 counter_type,
@@ -2214,7 +2215,7 @@ mod tests {
             count,
         } = &kw
         {
-            assert_eq!(counter_type, "P1P1");
+            assert_eq!(counter_type, &CounterType::Plus1Plus1);
             assert_eq!(*count, 1);
         }
 
@@ -2224,7 +2225,7 @@ mod tests {
             count,
         } = &kw2
         {
-            assert_eq!(counter_type, "P1P1");
+            assert_eq!(counter_type, &CounterType::Plus1Plus1);
             assert_eq!(*count, 3);
         }
     }
@@ -2365,7 +2366,7 @@ mod tests {
             Keyword::Protection(ProtectionTarget::ChosenColor),
             Keyword::Unknown("CustomKeyword".to_string()),
             Keyword::EtbCounter {
-                counter_type: "P1P1".to_string(),
+                counter_type: CounterType::Plus1Plus1,
                 count: 2,
             },
             Keyword::Toxic(2),

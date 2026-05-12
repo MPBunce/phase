@@ -12,6 +12,7 @@ use engine::types::ability::{
     ReplacementMode, RestrictionExpiry, TargetFilter,
 };
 use engine::types::card_type::Supertype;
+use engine::types::counter::{parse_counter_type, CounterType as EngineCounterType};
 use engine::types::replacements::ReplacementEvent;
 use engine::types::zones::Zone;
 
@@ -2497,14 +2498,16 @@ fn permanents_tag(p: &Permanents) -> String {
         .unwrap_or_else(|| "<unknown>".to_string())
 }
 
-fn counter_type_name(ct: &CounterType) -> String {
-    if let CounterType::PTCounter(p, t) = ct {
-        return format!("{p:+}/{t:+}");
-    }
-    format!("{ct:?}")
-        .strip_suffix("Counter")
-        .map(str::to_string)
-        .unwrap_or_else(|| format!("{ct:?}"))
+fn counter_type_name(ct: &CounterType) -> EngineCounterType {
+    let raw = if let CounterType::PTCounter(p, t) = ct {
+        format!("{p:+}/{t:+}")
+    } else {
+        format!("{ct:?}")
+            .strip_suffix("Counter")
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("{ct:?}"))
+    };
+    parse_counter_type(&raw)
 }
 
 fn variant_tag(a: &ReplacementActionWouldEnter) -> String {
@@ -3119,7 +3122,7 @@ mod tests {
                 count,
                 target,
             } => {
-                assert_eq!(counter_type, "+1/+1");
+                assert_eq!(counter_type, &EngineCounterType::Plus1Plus1);
                 assert_eq!(target, &TargetFilter::SelfRef);
                 assert!(
                     matches!(count, QE::Ref { qty: QR::CostXPaid }),

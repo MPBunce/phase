@@ -3133,7 +3133,7 @@ pub(super) fn lower_shuffle_ast(ast: ShuffleImperativeAst) -> ParsedEffectClause
 /// additional target-selection slots — the player chooses the target once
 /// on the primary effect and every chained `PutCounter` inherits it.
 pub(super) fn lower_put_counter_list(
-    entries: Vec<(String, QuantityExpr)>,
+    entries: Vec<(crate::types::counter::CounterType, QuantityExpr)>,
     target: TargetFilter,
     multi_target: Option<MultiTargetSpec>,
 ) -> ParsedEffectClause {
@@ -5115,7 +5115,7 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
                 ..Default::default()
             });
             let mut clause = parsed_clause(Effect::PutCounter {
-                counter_type: "P1P1".to_string(),
+                counter_type: crate::types::counter::CounterType::Plus1Plus1,
                 count: QuantityExpr::Fixed { value: 1 },
                 target,
             });
@@ -6969,7 +6969,7 @@ mod tests {
             matches!(
                 &clause.effect,
                 Effect::PutCounter { counter_type, count: QuantityExpr::Fixed { value: 1 }, .. }
-                if counter_type == "P1P1"
+                if *counter_type == crate::types::counter::CounterType::Plus1Plus1
             ),
             "Expected PutCounter P1P1, got {:?}",
             clause.effect

@@ -80,7 +80,7 @@ pub struct TokenSpec {
     pub static_abilities: Vec<StaticDefinition>,
     /// CR 122.6a: Counters placed on the token as it enters the battlefield
     /// (resolved from `QuantityExpr` at propose time).
-    pub enter_with_counters: Vec<(String, u32)>,
+    pub enter_with_counters: Vec<(CounterType, u32)>,
     /// CR 614.1: Token enters tapped.
     pub tapped: bool,
     /// CR 508.4: Token enters the battlefield attacking (not declared as
@@ -111,9 +111,9 @@ pub enum ProposedEvent {
         #[serde(default)]
         enter_tapped: EtbTapState,
         /// Counters to place on this permanent as it enters the battlefield.
-        /// Each entry is (counter_type_string, count). Set by ETB-counter replacements.
+        /// Each entry is (counter_type, count). Set by ETB-counter replacements.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        enter_with_counters: Vec<(String, u32)>,
+        enter_with_counters: Vec<(CounterType, u32)>,
         /// Override the controller on ETB. Used by Earthbending return ("under your control")
         /// and other "enters the battlefield under [player]'s control" effects.
         #[serde(default, skip_serializing_if = "Option::is_none")]

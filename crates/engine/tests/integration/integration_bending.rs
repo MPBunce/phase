@@ -7,6 +7,7 @@ use engine::game::zones::create_object;
 use engine::types::ability::{AbilityCost, Effect, QuantityExpr, ResolvedAbility, TargetFilter};
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
+use engine::types::counter::CounterType;
 use engine::types::events::{BendingType, GameEvent};
 use engine::types::game_state::{CastingVariant, ConvokeMode, GameState, PendingCast, WaitingFor};
 use engine::types::identifiers::{CardId, ObjectId};
@@ -1035,7 +1036,7 @@ fn test_earthbender_ascension_etb_completes_with_landfall() {
         let landfall_execute = engine::types::ability::AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::PutCounter {
-                counter_type: "quest".to_string(),
+                counter_type: CounterType::Generic("quest".to_string()),
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::SelfRef,
             },
@@ -1044,7 +1045,7 @@ fn test_earthbender_ascension_etb_completes_with_landfall() {
             engine::types::ability::AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::PutCounter {
-                    counter_type: "P1P1".to_string(),
+                    counter_type: CounterType::Plus1Plus1,
                     count: QuantityExpr::Fixed { value: 1 },
                     target: TargetFilter::Typed(
                         engine::types::ability::TypedFilter::creature()
@@ -1057,7 +1058,7 @@ fn test_earthbender_ascension_etb_completes_with_landfall() {
                 lhs: QuantityExpr::Ref {
                     qty: QuantityRef::CountersOn {
                         scope: engine::types::ability::ObjectScope::Source,
-                        counter_type: Some("quest".to_string()),
+                        counter_type: Some(CounterType::Generic("quest".to_string())),
                     },
                 },
                 comparator: Comparator::GE,
@@ -1113,7 +1114,7 @@ fn test_earthbender_ascension_etb_completes_with_landfall() {
             .execute(engine::types::ability::AbilityDefinition::new(
                 engine::types::ability::AbilityKind::Spell,
                 Effect::PutCounter {
-                    counter_type: "P1P1".to_string(),
+                    counter_type: CounterType::Plus1Plus1,
                     count: QuantityExpr::Fixed { value: 1 },
                     target: TargetFilter::SelfRef,
                 },
@@ -1396,7 +1397,7 @@ fn test_earthbender_landfall_trigger_resolves_without_hang() {
         let landfall_execute = engine::types::ability::AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::PutCounter {
-                counter_type: "quest".to_string(),
+                counter_type: CounterType::Generic("quest".to_string()),
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::SelfRef,
             },
@@ -1405,7 +1406,7 @@ fn test_earthbender_landfall_trigger_resolves_without_hang() {
             engine::types::ability::AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::PutCounter {
-                    counter_type: "P1P1".to_string(),
+                    counter_type: CounterType::Plus1Plus1,
                     count: QuantityExpr::Fixed { value: 1 },
                     target: TargetFilter::Typed(
                         engine::types::ability::TypedFilter::creature()
@@ -1417,7 +1418,7 @@ fn test_earthbender_landfall_trigger_resolves_without_hang() {
                 lhs: QuantityExpr::Ref {
                     qty: QuantityRef::CountersOn {
                         scope: engine::types::ability::ObjectScope::Source,
-                        counter_type: Some("quest".to_string()),
+                        counter_type: Some(CounterType::Generic("quest".to_string())),
                     },
                 },
                 comparator: Comparator::GE,
@@ -1602,7 +1603,7 @@ fn test_ai_passes_priority_on_earthbender_landfall() {
         let landfall_execute = engine::types::ability::AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::PutCounter {
-                counter_type: "quest".to_string(),
+                counter_type: CounterType::Generic("quest".to_string()),
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::SelfRef,
             },
@@ -1611,7 +1612,7 @@ fn test_ai_passes_priority_on_earthbender_landfall() {
             engine::types::ability::AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::PutCounter {
-                    counter_type: "P1P1".to_string(),
+                    counter_type: CounterType::Plus1Plus1,
                     count: QuantityExpr::Fixed { value: 1 },
                     target: TargetFilter::Typed(
                         engine::types::ability::TypedFilter::creature()
@@ -1623,7 +1624,7 @@ fn test_ai_passes_priority_on_earthbender_landfall() {
                 lhs: QuantityExpr::Ref {
                     qty: QuantityRef::CountersOn {
                         scope: engine::types::ability::ObjectScope::Source,
-                        counter_type: Some("quest".to_string()),
+                        counter_type: Some(CounterType::Generic("quest".to_string())),
                     },
                 },
                 comparator: Comparator::GE,
@@ -1970,7 +1971,7 @@ fn build_earthbend_ability(
 
     let mut put_counters = ResolvedAbility::new(
         Effect::PutCounter {
-            counter_type: "P1P1".to_string(),
+            counter_type: CounterType::Plus1Plus1,
             count: QuantityExpr::Fixed {
                 value: counter_count,
             },

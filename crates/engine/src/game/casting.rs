@@ -4610,12 +4610,11 @@ pub fn pay_ability_cost(
                     target: TargetFilter::SelfRef,
                 } => {
                     let count = super::quantity::resolve_quantity(state, count, player, source_id);
-                    let counter_kind = crate::types::counter::parse_counter_type(counter_type);
                     super::effects::counters::add_counter_with_replacement(
                         state,
                         player,
                         source_id,
-                        counter_kind,
+                        counter_type.clone(),
                         count.unsigned_abs(),
                         events,
                     );
@@ -4725,11 +4724,10 @@ pub fn pay_ability_cost(
             counter_type,
             target: None,
         } => {
-            let counter_kind = crate::types::counter::parse_counter_type(counter_type);
             super::effects::counters::remove_counter_with_replacement(
                 state,
                 source_id,
-                counter_kind,
+                counter_type.clone(),
                 *count,
                 events,
             );
@@ -7873,7 +7871,7 @@ mod tests {
                 AbilityDefinition::new(
                     AbilityKind::Activated,
                     Effect::PutCounterAll {
-                        counter_type: "P1P1".to_string(),
+                        counter_type: crate::types::counter::CounterType::Plus1Plus1,
                         count: QuantityExpr::Fixed { value: 1 },
                         target: TargetFilter::Typed(
                             TypedFilter::creature().controller(ControllerRef::You),
@@ -15361,7 +15359,7 @@ mod tests {
             let source = source_with_counters(&mut state, CounterType::Plus1Plus1, 2);
             let cost = AbilityCost::RemoveCounter {
                 count: 2,
-                counter_type: "+1/+1".to_string(),
+                counter_type: CounterType::Plus1Plus1,
                 target: None,
             };
             let mut events = Vec::new();
@@ -15398,7 +15396,7 @@ mod tests {
             let source = source_with_counters(&mut state, CounterType::Plus1Plus1, 0);
             let cost = AbilityCost::RemoveCounter {
                 count: 1,
-                counter_type: "+1/+1".to_string(),
+                counter_type: CounterType::Plus1Plus1,
                 target: None,
             };
             assert!(
@@ -15417,7 +15415,7 @@ mod tests {
             let source = source_with_counters(&mut state, CounterType::Plus1Plus1, 1);
             let cost = AbilityCost::RemoveCounter {
                 count: 2,
-                counter_type: "+1/+1".to_string(),
+                counter_type: CounterType::Plus1Plus1,
                 target: None,
             };
             assert!(
@@ -15437,7 +15435,7 @@ mod tests {
             let source = source_with_counters(&mut state, CounterType::Plus1Plus1, 3);
             let cost = AbilityCost::RemoveCounter {
                 count: 1,
-                counter_type: "+1/+1".to_string(),
+                counter_type: CounterType::Plus1Plus1,
                 target: None,
             };
             let mut events = Vec::new();

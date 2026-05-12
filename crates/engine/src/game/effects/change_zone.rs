@@ -3,6 +3,7 @@ use crate::game::zones;
 use crate::types::ability::{
     Duration, Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TypedFilter,
 };
+use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{ExileLink, ExileLinkKind, GameState, WaitingFor};
 use crate::types::identifiers::{ObjectId, TrackedSetId};
@@ -157,7 +158,7 @@ pub(crate) fn execute_zone_move(
     enter_transformed: bool,
     effect_enter_tapped: bool,
     controller_override: Option<PlayerId>,
-    effect_enter_with_counters: &[(String, u32)],
+    effect_enter_with_counters: &[(CounterType, u32)],
     events: &mut Vec<GameEvent>,
 ) -> ZoneMoveResult {
     let mut proposed = ProposedEvent::zone_change(obj_id, from_zone, dest_zone, Some(source_id));
@@ -288,7 +289,7 @@ pub fn resolve(
             // u32 values up front so the zone-move pipeline carries fully-
             // resolved counts (matches the Token resolver pattern at
             // `effects/token.rs:400`).
-            let resolved_counters: Vec<(String, u32)> = enter_with_counters
+            let resolved_counters: Vec<(CounterType, u32)> = enter_with_counters
                 .iter()
                 .map(|(ct, qty)| {
                     let n =
@@ -903,7 +904,10 @@ mod tests {
                 enter_tapped: false,
                 enters_attacking: false,
                 up_to: false,
-                enter_with_counters: vec![("egg".to_string(), QuantityExpr::Fixed { value: 3 })],
+                enter_with_counters: vec![(
+                    CounterType::Generic("egg".to_string()),
+                    QuantityExpr::Fixed { value: 3 },
+                )],
             },
             vec![TargetRef::Object(obj_id)],
             ObjectId(100),

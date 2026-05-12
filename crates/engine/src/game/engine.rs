@@ -10805,7 +10805,7 @@ mod phase_trigger_regression_tests {
                     .execute(AbilityDefinition::new(
                         AbilityKind::Database,
                         Effect::PutCounter {
-                            counter_type: "P1P1".to_string(),
+                            counter_type: crate::types::counter::CounterType::Plus1Plus1,
                             count: QuantityExpr::Fixed { value: 1 },
                             target: TargetFilter::SelfRef,
                         },
@@ -10997,7 +10997,7 @@ mod phase_trigger_regression_tests {
                     .execute(AbilityDefinition::new(
                         AbilityKind::Database,
                         Effect::PutCounter {
-                            counter_type: "P1P1".to_string(),
+                            counter_type: crate::types::counter::CounterType::Plus1Plus1,
                             count: QuantityExpr::Fixed { value: 1 },
                             target: TargetFilter::SelfRef,
                         },
@@ -12342,7 +12342,7 @@ mod phase_trigger_regression_tests {
             .execute(crate::types::ability::AbilityDefinition::new(
                 crate::types::ability::AbilityKind::Spell,
                 Effect::PutCounter {
-                    counter_type: "P1P1".to_string(),
+                    counter_type: crate::types::counter::CounterType::Plus1Plus1,
                     count: crate::types::ability::QuantityExpr::Fixed { value: 5 },
                     target: TargetFilter::SelfRef,
                 },

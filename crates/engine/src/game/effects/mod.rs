@@ -3674,7 +3674,7 @@ mod tests {
         );
         let ability = ResolvedAbility::new(
             Effect::PutCounterAll {
-                counter_type: "P1P1".to_string(),
+                counter_type: CounterType::Plus1Plus1,
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
             },

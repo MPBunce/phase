@@ -7679,7 +7679,10 @@ mod tests {
                 count,
                 ..
             } => {
-                assert_eq!(counter_type, "P1P1");
+                assert_eq!(
+                    counter_type,
+                    &crate::types::counter::CounterType::Plus1Plus1
+                );
                 assert_eq!(
                     *count,
                     QuantityExpr::Ref {
@@ -7834,13 +7837,13 @@ mod tests {
                     lhs: QuantityExpr::Ref { qty: QuantityRef::CountersOn { scope: ObjectScope::Source, counter_type: Some(counter_type) } },
                     comparator: Comparator::GE,
                     rhs: QuantityExpr::Fixed { value: 4 },
-                }) if counter_type == "quest"
+                }) if *counter_type == crate::types::counter::CounterType::Generic("quest".to_string())
             ),
             "Expected QuantityCheck(quest >= 4), got {:?}",
             def.condition,
         );
         assert!(
-            matches!(&*def.effect, Effect::PutCounter { counter_type, count: QuantityExpr::Fixed { value: 1 }, .. } if counter_type == "P1P1"),
+            matches!(&*def.effect, Effect::PutCounter { counter_type, count: QuantityExpr::Fixed { value: 1 }, .. } if *counter_type == crate::types::counter::CounterType::Plus1Plus1),
             "Expected PutCounter P1P1, got {:?}",
             def.effect,
         );
@@ -7864,7 +7867,7 @@ mod tests {
                     lhs: QuantityExpr::Ref { qty: QuantityRef::CountersOn { scope: ObjectScope::Source, counter_type: Some(counter_type) } },
                     comparator: Comparator::GE,
                     rhs: QuantityExpr::Fixed { value: 5 },
-                }) if counter_type == "hunger"
+                }) if *counter_type == crate::types::counter::CounterType::Generic("hunger".to_string())
             ),
             "Expected QuantityCheck(hunger >= 5), got {:?}",
             def.condition,
@@ -7894,7 +7897,7 @@ mod tests {
                     lhs: QuantityExpr::Ref { qty: QuantityRef::CountersOn { scope: ObjectScope::Source, counter_type: Some(counter_type) } },
                     comparator: Comparator::GE,
                     rhs: QuantityExpr::Fixed { value: 3 },
-                }) if counter_type == "P1P1"
+                }) if *counter_type == crate::types::counter::CounterType::Plus1Plus1
             ),
             "Expected QuantityCheck(P1P1 >= 3), got {:?}",
             def.condition,
@@ -7919,7 +7922,7 @@ mod tests {
                     lhs: QuantityExpr::Ref { qty: QuantityRef::CountersOn { scope: ObjectScope::Source, counter_type: Some(counter_type) } },
                     comparator: Comparator::GE,
                     rhs: QuantityExpr::Fixed { value: 1 },
-                }) if counter_type == "oil"
+                }) if *counter_type == crate::types::counter::CounterType::Generic("oil".to_string())
             ),
             "Expected QuantityCheck(oil >= 1), got {:?}",
             def.condition,
@@ -7944,7 +7947,7 @@ mod tests {
                     lhs: QuantityExpr::Ref { qty: QuantityRef::CountersOn { scope: ObjectScope::Source, counter_type: Some(counter_type) } },
                     comparator: Comparator::EQ,
                     rhs: QuantityExpr::Fixed { value: 0 },
-                }) if counter_type == "ice"
+                }) if *counter_type == crate::types::counter::CounterType::Generic("ice".to_string())
             ),
             "Expected QuantityCheck(ice == 0), got {:?}",
             def.condition,
@@ -7966,7 +7969,7 @@ mod tests {
         // Node 1: PutCounter(quest, 1, SelfRef), no condition
         assert!(def.condition.is_none(), "Node 1 should have no condition");
         assert!(
-            matches!(&*def.effect, Effect::PutCounter { counter_type, count: QuantityExpr::Fixed { value: 1 }, target: TargetFilter::SelfRef } if counter_type == "quest"),
+            matches!(&*def.effect, Effect::PutCounter { counter_type, count: QuantityExpr::Fixed { value: 1 }, target: TargetFilter::SelfRef } if *counter_type == crate::types::counter::CounterType::Generic("quest".to_string())),
             "Node 1 should be PutCounter(quest, SelfRef), got {:?}",
             def.effect,
         );
@@ -7983,7 +7986,7 @@ mod tests {
                     lhs: QuantityExpr::Ref { qty: QuantityRef::CountersOn { scope: ObjectScope::Source, counter_type: Some(counter_type) } },
                     comparator: Comparator::GE,
                     rhs: QuantityExpr::Fixed { value: 4 },
-                }) if counter_type == "quest"
+                }) if *counter_type == crate::types::counter::CounterType::Generic("quest".to_string())
             ),
             "Node 2 condition should be QuantityCheck(quest >= 4), got {:?}",
             node2.condition,
@@ -7994,7 +7997,10 @@ mod tests {
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Typed(tf),
             } => {
-                assert_eq!(counter_type, "P1P1");
+                assert_eq!(
+                    counter_type,
+                    &crate::types::counter::CounterType::Plus1Plus1
+                );
                 assert!(
                     tf.controller == Some(crate::types::ability::ControllerRef::You),
                     "P1P1 target should be creature you control, got {:?}",

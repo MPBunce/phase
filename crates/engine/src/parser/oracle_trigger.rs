@@ -32,6 +32,7 @@ use crate::types::ability::{
     TriggerDefinition, TypeFilter, TypedFilter, UnlessPayModifier,
 };
 use crate::types::card_type::CoreType;
+use crate::types::counter::parse_counter_type;
 use crate::types::events::PlayerActionKind;
 use crate::types::mana::ManaColor;
 use crate::types::phase::Phase;
@@ -2049,7 +2050,7 @@ fn try_extract_had_counter_condition(
     Some((
         strip_condition_clause(text, pos, clause_len),
         Some(TriggerCondition::HadCounters {
-            counter_type: Some(counter_type_text.to_string()),
+            counter_type: Some(parse_counter_type(counter_type_text)),
         }),
     ))
 }
@@ -11955,7 +11956,12 @@ mod tests {
                 count,
                 target,
             } => {
-                assert_eq!(counter_type, "charge");
+                assert_eq!(
+                    counter_type,
+                    &Some(crate::types::counter::CounterType::Generic(
+                        "charge".to_string()
+                    ))
+                );
                 assert_eq!(*count, -1, "count=-1 is the remove-all sentinel");
                 assert!(matches!(target, TargetFilter::SelfRef));
             }
@@ -13199,7 +13205,7 @@ mod tests {
         assert_eq!(
             cond.unwrap(),
             TriggerCondition::HadCounters {
-                counter_type: Some("+1/+1".to_string()),
+                counter_type: Some(crate::types::counter::CounterType::Plus1Plus1),
             }
         );
     }
@@ -14081,7 +14087,10 @@ mod tests {
                 target,
                 counter_type,
             } => {
-                assert_eq!(counter_type, "P1P1");
+                assert_eq!(
+                    counter_type,
+                    &crate::types::counter::CounterType::Plus1Plus1
+                );
                 assert_eq!(
                     count,
                     &QuantityExpr::Ref {
@@ -14256,9 +14265,10 @@ mod tests {
                 target,
                 ..
             } => {
-                // +1/+1 counters use the normalized "P1P1" canonical form
-                // (see oracle_effect::counter::normalize_counter_type).
-                assert_eq!(counter_type, "P1P1");
+                assert_eq!(
+                    counter_type,
+                    &crate::types::counter::CounterType::Plus1Plus1
+                );
                 assert!(
                     matches!(target, TargetFilter::SelfRef),
                     "+1/+1 counter must land on the post-copy self, got {target:?}"

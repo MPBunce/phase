@@ -23,7 +23,7 @@ use crate::types::ability::{
     TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::{CoreType, Supertype};
-use crate::types::counter::CounterMatch;
+use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::keywords::Keyword;
 use crate::types::mana::{ManaColor, ManaCost};
 use crate::types::phase::Phase;
@@ -754,7 +754,7 @@ pub(super) fn strip_target_keyword_instead(text: &str) -> (Option<AbilityConditi
     (None, text.to_string())
 }
 
-fn parse_counter_threshold(text: &str) -> Option<(Comparator, i32, String, usize)> {
+fn parse_counter_threshold(text: &str) -> Option<(Comparator, i32, CounterType, usize)> {
     let original_len = text.len();
 
     fn parse_counter_on_suffix(after_type: &str) -> Option<&str> {
@@ -799,7 +799,7 @@ fn parse_counter_threshold(text: &str) -> Option<(Comparator, i32, String, usize
 fn build_counter_condition(
     comparator: Comparator,
     threshold: i32,
-    counter_type: String,
+    counter_type: CounterType,
 ) -> AbilityCondition {
     AbilityCondition::QuantityCheck {
         lhs: QuantityExpr::Ref {
@@ -1799,7 +1799,7 @@ fn static_condition_to_ability_condition(
                 qty: match counters {
                     CounterMatch::OfType(ct) => QuantityRef::CountersOn {
                         scope: ObjectScope::Source,
-                        counter_type: Some(ct.as_str().to_string()),
+                        counter_type: Some(ct.clone()),
                     },
                     CounterMatch::Any => QuantityRef::CountersOn {
                         scope: ObjectScope::Source,
@@ -2977,7 +2977,7 @@ mod tests {
                     },
                 comparator: Comparator::GE,
                 rhs: QuantityExpr::Fixed { value: 2 },
-            } => assert_eq!(counter_type, "P1P1"),
+            } => assert_eq!(counter_type, CounterType::Plus1Plus1),
             other => panic!("unexpected bridged condition: {other:?}"),
         }
     }

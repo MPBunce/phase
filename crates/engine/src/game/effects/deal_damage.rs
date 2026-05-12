@@ -1157,7 +1157,7 @@ mod tests {
                     .execute(AbilityDefinition::new(
                         AbilityKind::Spell,
                         Effect::PutCounter {
-                            counter_type: "M1M1".to_string(),
+                            counter_type: CounterType::Minus1Minus1,
                             count: QuantityExpr::Ref {
                                 qty: QuantityRef::EventContextAmount,
                             },
@@ -1330,7 +1330,7 @@ mod tests {
                     .execute(AbilityDefinition::new(
                         AbilityKind::Spell,
                         Effect::PutCounter {
-                            counter_type: "M1M1".to_string(),
+                            counter_type: CounterType::Minus1Minus1,
                             count: QuantityExpr::Ref {
                                 qty: QuantityRef::EventContextAmount,
                             },

@@ -3128,7 +3128,7 @@ pub struct GameState {
     /// Added by delayed triggers like "that creature enters with an additional +1/+1 counter".
     /// Consumed when the object enters the battlefield. Each entry: (object_id, counter_type, count).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub pending_etb_counters: Vec<(ObjectId, String, u32)>,
+    pub pending_etb_counters: Vec<(ObjectId, CounterType, u32)>,
 
     /// Modal modes chosen this turn per source: (ObjectId, mode_index).
     /// CR 700.2: "choose one that hasn't been chosen this turn"

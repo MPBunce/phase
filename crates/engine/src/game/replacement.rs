@@ -8,6 +8,7 @@ use crate::types::ability::{
     TargetFilter, TargetRef,
 };
 use crate::types::card_type::CoreType;
+use crate::types::counter::CounterType;
 
 use super::filter::{
     matches_target_filter, matches_target_filter_on_battlefield_entry, FilterContext,
@@ -2381,7 +2382,7 @@ fn extract_etb_counters(
     state: &GameState,
     source_id: ObjectId,
     event: &ProposedEvent,
-) -> Vec<(String, u32)> {
+) -> Vec<(CounterType, u32)> {
     let exec = match ability {
         Some(e) => e,
         None => return Vec::new(),
@@ -2472,14 +2473,14 @@ fn extract_etb_counters(
 #[derive(Debug, Clone, Default)]
 pub(super) struct EventModifiers {
     etb_tap_state: EtbTapState,
-    etb_counters: Vec<(String, u32)>,
+    etb_counters: Vec<(CounterType, u32)>,
     redirect_zone: Option<Zone>,
 }
 
 #[derive(Debug, Clone, Default)]
 pub(super) struct EnterReplacementModifiers {
     pub enter_tapped: Option<bool>,
-    pub counters: Vec<(String, u32)>,
+    pub counters: Vec<(CounterType, u32)>,
 }
 
 impl EventModifiers {
@@ -2625,7 +2626,7 @@ fn battlefield_entry_current_tapped(event: &ProposedEvent) -> Option<bool> {
     }
 }
 
-fn battlefield_entry_counters(event: &ProposedEvent) -> Option<&Vec<(String, u32)>> {
+fn battlefield_entry_counters(event: &ProposedEvent) -> Option<&Vec<(CounterType, u32)>> {
     match event {
         ProposedEvent::ZoneChange {
             enter_with_counters,
@@ -3112,7 +3113,7 @@ mod tests {
         let mut first = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::PutCounter {
-                counter_type: "P1P1".to_string(),
+                counter_type: CounterType::Plus1Plus1,
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::SelfRef,
             },
@@ -3120,7 +3121,7 @@ mod tests {
         first.sub_ability = Some(Box::new(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::PutCounter {
-                counter_type: "shield".to_string(),
+                counter_type: CounterType::Generic("shield".to_string()),
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::SelfRef,
             },
@@ -3129,7 +3130,10 @@ mod tests {
 
         assert_eq!(
             extract_etb_counters(Some(&first), &state, ObjectId(1), &event),
-            vec![("P1P1".to_string(), 1), ("shield".to_string(), 1)]
+            vec![
+                (CounterType::Plus1Plus1, 1),
+                (CounterType::Generic("shield".to_string()), 1)
+            ]
         );
     }
 
@@ -5772,7 +5776,7 @@ mod tests {
             AbilityKind::Spell,
             Effect::PutCounter {
                 target: TargetFilter::SelfRef,
-                counter_type: "P1P1".to_string(),
+                counter_type: CounterType::Plus1Plus1,
                 count: QuantityExpr::Ref {
                     qty: QuantityRef::ManaSpentToCast {
                         scope: crate::types::ability::CastManaObjectScope::SelfObject,
@@ -5822,7 +5826,7 @@ mod tests {
             }) => {
                 assert_eq!(
                     enter_with_counters,
-                    vec![("P1P1".to_string(), 3u32)],
+                    vec![(CounterType::Plus1Plus1, 3u32)],
                     "expected 3 P1P1 counters (3 distinct colors spent)"
                 );
             }

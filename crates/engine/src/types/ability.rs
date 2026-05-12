@@ -483,7 +483,7 @@ pub enum LifeAmount {
 pub enum DoubleTarget {
     /// CR 701.10e: Double the number of a kind of counter on a permanent.
     /// None = all counter types on the permanent.
-    Counters { counter_type: Option<String> },
+    Counters { counter_type: Option<CounterType> },
     /// CR 701.10d: Double a player's life total.
     LifeTotal,
     /// CR 701.10f: Double the amount of a type of mana in a player's mana pool.
@@ -2270,7 +2270,7 @@ pub enum QuantityRef {
     CountersOn {
         scope: ObjectScope,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        counter_type: Option<String>,
+        counter_type: Option<CounterType>,
     },
     /// CR 122.1: Total counters across all objects matching a filter.
     /// Used for phrases like "the number of +1/+1 counters on lands you control"
@@ -2278,7 +2278,7 @@ pub enum QuantityRef {
     /// you control" (`counter_type: None`, sums across every counter type).
     CountersOnObjects {
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        counter_type: Option<String>,
+        counter_type: Option<CounterType>,
         filter: TargetFilter,
     },
     /// CR 122.1: Count of a named player-counter kind on a player (or summed across
@@ -3545,7 +3545,7 @@ pub enum AbilityCost {
     },
     RemoveCounter {
         count: u32,
-        counter_type: String,
+        counter_type: CounterType,
         #[serde(default)]
         target: Option<TargetFilter>,
     },
@@ -4075,7 +4075,7 @@ pub enum Effect {
         /// Each entry is (counter_type, count). Used by "The token enters with
         /// X +1/+1 counters on it" patterns.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        enter_with_counters: Vec<(String, QuantityExpr)>,
+        enter_with_counters: Vec<(CounterType, QuantityExpr)>,
     },
     GainLife {
         #[serde(default = "default_quantity_one")]
@@ -4110,14 +4110,15 @@ pub enum Effect {
         target: TargetFilter,
     },
     AddCounter {
-        counter_type: String,
+        counter_type: CounterType,
         #[serde(default = "default_quantity_one")]
         count: QuantityExpr,
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,
     },
     RemoveCounter {
-        counter_type: String,
+        #[serde(default)]
+        counter_type: Option<CounterType>,
         #[serde(default = "default_one_i32")]
         count: i32,
         #[serde(default = "default_target_filter_any")]
@@ -4248,7 +4249,7 @@ pub enum Effect {
         /// additional +1/+1 counters on it" (Darkness Crystal) and "exile it
         /// with three egg counters on it" (Darigaaz Reincarnated).
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        enter_with_counters: Vec<(String, QuantityExpr)>,
+        enter_with_counters: Vec<(CounterType, QuantityExpr)>,
     },
     ChangeZoneAll {
         #[serde(default)]
@@ -4482,7 +4483,7 @@ pub enum Effect {
         target: TargetFilter,
     },
     PutCounter {
-        counter_type: String,
+        counter_type: CounterType,
         #[serde(default = "default_quantity_one")]
         count: QuantityExpr,
         #[serde(default = "default_target_filter_any")]
@@ -4490,14 +4491,14 @@ pub enum Effect {
     },
     /// CR 122.1: Place counters on all objects matching a filter (no targeting).
     PutCounterAll {
-        counter_type: String,
+        counter_type: CounterType,
         #[serde(default = "default_quantity_one")]
         count: QuantityExpr,
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,
     },
     MultiplyCounter {
-        counter_type: String,
+        counter_type: CounterType,
         #[serde(default = "default_two_i32")]
         multiplier: i32,
         #[serde(default = "default_target_filter_any")]
@@ -4524,7 +4525,7 @@ pub enum Effect {
         source: TargetFilter,
         /// When Some, only move this counter type. When None, move all counters.
         #[serde(default)]
-        counter_type: Option<String>,
+        counter_type: Option<CounterType>,
         /// When Some, transfer up to this many matching counters. When None,
         /// transfer every matching counter.
         #[serde(default)]
@@ -4860,7 +4861,7 @@ pub enum Effect {
     /// counters to `pending_etb_counters` so they are applied when the object enters
     /// the battlefield. Used by "that creature enters with an additional +1/+1 counter".
     AddPendingETBCounters {
-        counter_type: String,
+        counter_type: CounterType,
         count: QuantityExpr,
     },
     /// CR 114.1 + CR 114.4: Create an emblem with the specified abilities in
@@ -7568,7 +7569,7 @@ pub enum TriggerCondition {
     /// CR 601.2b: "if no mana was spent to cast it" / "if mana from a [source] was spent"
     ManaSpentCondition { text: String },
     /// CR 400.7: "if it had a +1/+1 counter on it" / "if it had counters on it"
-    HadCounters { counter_type: Option<String> },
+    HadCounters { counter_type: Option<CounterType> },
     /// CR 903.3: "if you control your commander" — Lieutenant mechanic.
     /// True when the controller controls at least one of their commander(s) on the battlefield.
     ControlsCommander,
@@ -8726,7 +8727,7 @@ pub enum ContinuousModification {
     /// with the layer system normally (Layer 7c/7d) via the CounterPT
     /// machinery already in place.
     AddCounterOnEnter {
-        counter_type: String,
+        counter_type: CounterType,
         count: QuantityExpr,
         /// `None` = unconditional. `Some(t)` gates the counter on the
         /// resolved object having `core_type == t` after copy values are
@@ -9973,7 +9974,7 @@ mod tests {
         fn remove_counter() {
             let cost = AbilityCost::RemoveCounter {
                 count: 1,
-                counter_type: "+1/+1".to_string(),
+                counter_type: CounterType::Plus1Plus1,
                 target: None,
             };
             assert_eq!(cost.categories(), vec![CostCategory::RemovesCounters]);

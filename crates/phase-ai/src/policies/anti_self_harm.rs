@@ -8,6 +8,8 @@ use engine::types::ability::{
 };
 use engine::types::actions::GameAction;
 use engine::types::card_type::{CoreType, Supertype};
+#[cfg(test)]
+use engine::types::counter::CounterType;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::{Keyword, WardCost};
@@ -1183,7 +1185,7 @@ mod tests {
     #[test]
     fn plus_counter_is_beneficial() {
         let effect = Effect::AddCounter {
-            counter_type: "+1/+1".to_string(),
+            counter_type: CounterType::Plus1Plus1,
             count: QuantityExpr::Fixed { value: 1 },
             target: TargetFilter::Any,
         };
@@ -1193,7 +1195,7 @@ mod tests {
     #[test]
     fn minus_counter_is_harmful() {
         let effect = Effect::AddCounter {
-            counter_type: "-1/-1".to_string(),
+            counter_type: CounterType::Minus1Minus1,
             count: QuantityExpr::Fixed { value: 1 },
             target: TargetFilter::Any,
         };
@@ -1207,7 +1209,7 @@ mod tests {
     #[test]
     fn put_counter_plus_is_beneficial() {
         let effect = Effect::PutCounter {
-            counter_type: "+1/+1".to_string(),
+            counter_type: CounterType::Plus1Plus1,
             count: QuantityExpr::Fixed { value: 1 },
             target: TargetFilter::Any,
         };
@@ -1217,7 +1219,7 @@ mod tests {
     #[test]
     fn put_counter_all_minus_is_harmful() {
         let effect = Effect::PutCounterAll {
-            counter_type: "-1/-1".to_string(),
+            counter_type: CounterType::Minus1Minus1,
             count: QuantityExpr::Fixed { value: 1 },
             target: TargetFilter::Any,
         };
@@ -1239,7 +1241,7 @@ mod tests {
     #[test]
     fn remove_plus_counter_is_harmful() {
         let effect = Effect::RemoveCounter {
-            counter_type: "+1/+1".to_string(),
+            counter_type: Some(CounterType::Plus1Plus1),
             count: 1,
             target: TargetFilter::Any,
         };
@@ -1249,7 +1251,7 @@ mod tests {
     #[test]
     fn remove_minus_counter_is_beneficial() {
         let effect = Effect::RemoveCounter {
-            counter_type: "-1/-1".to_string(),
+            counter_type: Some(CounterType::Minus1Minus1),
             count: 1,
             target: TargetFilter::Any,
         };

@@ -3,6 +3,8 @@ use crate::types::ability::{
     ModalSelectionCondition, ModalSelectionConstraint, QuantityExpr, QuantityRef, ResolvedAbility,
     SpellContext, TargetChoiceTiming, TargetFilter, TargetRef, TypeFilter, TypedFilter,
 };
+#[cfg(test)]
+use crate::types::counter::CounterType;
 use crate::types::game_state::{
     GameState, TargetSelectionConstraint, TargetSelectionProgress, TargetSelectionSlot,
 };
@@ -3017,7 +3019,7 @@ mod tests {
 
         let mut put_counters = ResolvedAbility::new(
             Effect::PutCounter {
-                counter_type: "P1P1".to_string(),
+                counter_type: CounterType::Plus1Plus1,
                 count: QuantityExpr::Fixed { value: 2 },
                 target: TargetFilter::Or {
                     filters: vec![
@@ -3926,7 +3928,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::PutCounterAll {
-                counter_type: "P1P1".to_string(),
+                counter_type: CounterType::Plus1Plus1,
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Typed(
                     TypedFilter::creature().controller(ControllerRef::TargetPlayer),
@@ -4358,7 +4360,7 @@ mod tests {
 
         let mut ability = ResolvedAbility::new(
             Effect::PutCounter {
-                counter_type: "P1P1".to_string(),
+                counter_type: CounterType::Plus1Plus1,
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Typed(TypedFilter::creature()),
             },
@@ -4537,7 +4539,7 @@ mod tests {
     fn assign_selected_slots_collects_multi_target_choices() {
         let mut ability = ResolvedAbility::new(
             Effect::PutCounter {
-                counter_type: "P1P1".to_string(),
+                counter_type: CounterType::Plus1Plus1,
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Typed(TypedFilter::creature()),
             },

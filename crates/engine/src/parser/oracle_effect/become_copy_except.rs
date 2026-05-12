@@ -529,9 +529,7 @@ fn parse_enters_with_additional_counter(input: &str) -> Option<(&str, Continuous
     if counter_text.is_empty() {
         return None;
     }
-    let counter_type = crate::types::counter::parse_counter_type(counter_text)
-        .as_str()
-        .to_string();
+    let counter_type = crate::types::counter::parse_counter_type(counter_text);
     // Optional `" if it's a <core_type>"` tail. Multiple Oracle variants:
     // "if it's a", "if it's an", "if it is a", smart quotes.
     let (rest, if_type) = parse_optional_if_type(after_counter);
@@ -1064,7 +1062,10 @@ mod tests {
                 count,
                 if_type,
             } => {
-                assert_eq!(counter_type, "P1P1");
+                assert_eq!(
+                    counter_type,
+                    &crate::types::counter::CounterType::Plus1Plus1
+                );
                 assert_eq!(*count, QuantityExpr::Fixed { value: 1 });
                 assert_eq!(*if_type, Some(CoreType::Creature));
             }
@@ -1089,7 +1090,7 @@ mod tests {
                 if_type: Some(CoreType::Creature),
                 counter_type,
                 ..
-            } if counter_type == "P1P1"
+            } if *counter_type == crate::types::counter::CounterType::Plus1Plus1
         )));
         assert!(mods.iter().any(|m| matches!(
             m,
@@ -1097,7 +1098,7 @@ mod tests {
                 if_type: Some(CoreType::Planeswalker),
                 counter_type,
                 ..
-            } if counter_type == "loyalty"
+            } if *counter_type == crate::types::counter::CounterType::Loyalty
         )));
         assert!(mods.iter().any(|m| matches!(
             m,

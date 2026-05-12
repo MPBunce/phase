@@ -205,22 +205,19 @@ impl AbilityCost {
                 count,
                 counter_type,
                 target,
-            } => {
-                let counter_kind = crate::types::counter::parse_counter_type(counter_type);
-                match target {
-                    None => counter_on_object(state, source, &counter_kind) >= *count,
-                    Some(tf) => {
-                        let ctx = FilterContext::from_source(state, source);
-                        state.battlefield.iter().any(|&id| {
-                            state.objects.get(&id).is_some_and(|o| {
-                                o.controller == player
-                                    && matches_target_filter(state, id, tf, &ctx)
-                                    && counter_on_object(state, id, &counter_kind) >= *count
-                            })
+            } => match target {
+                None => counter_on_object(state, source, counter_type) >= *count,
+                Some(tf) => {
+                    let ctx = FilterContext::from_source(state, source);
+                    state.battlefield.iter().any(|&id| {
+                        state.objects.get(&id).is_some_and(|o| {
+                            o.controller == player
+                                && matches_target_filter(state, id, tf, &ctx)
+                                && counter_on_object(state, id, counter_type) >= *count
                         })
-                    }
+                    })
                 }
-            }
+            },
             // CR 107.14: A player can pay {E} only if they have enough energy.
             AbilityCost::PayEnergy { amount } => state
                 .players
