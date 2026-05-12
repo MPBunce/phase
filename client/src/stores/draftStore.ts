@@ -51,6 +51,7 @@ interface DraftStoreActions {
   resumeDraft: () => Promise<void>;
   abandonDraft: () => Promise<void>;
   pickCard: (cardInstanceId: string) => Promise<void>;
+  autoPickCard: () => Promise<void>;
   selectCard: (cardInstanceId: string | null) => void;
   confirmPick: () => Promise<void>;
   addToDeck: (cardName: string) => void;
@@ -167,6 +168,14 @@ function persistDraft(): void {
 function persistDraftDebounced(): void {
   if (debounceTimer) clearTimeout(debounceTimer);
   debounceTimer = setTimeout(persistDraft, 500);
+}
+
+/** Apply an updated draft view after a pick (manual or auto) and persist. */
+function applyPickResult(view: DraftPlayerView): void {
+  const nextPhase: DraftPhase =
+    view.status === "Deckbuilding" ? "deckbuilding" : "drafting";
+  useDraftStore.setState({ view, phase: nextPhase, selectedCard: null });
+  persistDraft();
 }
 
 // ── Store ───────────────────────────────────────────────────────────────
@@ -315,13 +324,13 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()(
     pickCard: async (cardInstanceId) => {
       const { adapter } = get();
       if (!adapter) return;
+      applyPickResult(await adapter.submitPick(cardInstanceId));
+    },
 
-      const view = await adapter.submitPick(cardInstanceId);
-      const nextPhase: DraftPhase =
-        view.status === "Deckbuilding" ? "deckbuilding" : "drafting";
-
-      set({ view, phase: nextPhase, selectedCard: null });
-      persistDraft();
+    autoPickCard: async () => {
+      const { adapter } = get();
+      if (!adapter) return;
+      applyPickResult(await adapter.autoPick());
     },
 
     selectCard: (cardInstanceId) => {

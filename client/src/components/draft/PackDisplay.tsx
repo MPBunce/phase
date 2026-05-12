@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 
 import { useCardImage } from "../../hooks/useCardImage";
 import { useDraftStore } from "../../stores/draftStore";
@@ -83,12 +83,16 @@ const RARITY_LABELS: Record<string, string> = {
   common: "Common",
 };
 
-const RARITY_COLORS: Record<string, string> = {
-  mythic: "text-orange-400",
-  rare: "text-amber-400",
-  uncommon: "text-slate-300",
-  common: "text-white/50",
+// Distinct hues per rarity (mythic burnt-orange vs rare pale-gold reads at a glance),
+// with a matching left-rule accent on the section header.
+const RARITY_STYLES: Record<string, { text: string; accent: string }> = {
+  mythic: { text: "text-orange-400", accent: "border-orange-400/55" },
+  rare: { text: "text-amber-200", accent: "border-amber-300/45" },
+  uncommon: { text: "text-slate-300", accent: "border-slate-300/30" },
+  common: { text: "text-white/45", accent: "border-white/15" },
 };
+
+const RARITY_STYLE_FALLBACK = { text: "text-white/45", accent: "border-white/15" } as const;
 
 function groupByRarity(cards: DraftCardInstance[]) {
   const groups: [string, DraftCardInstance[]][] = [];
@@ -107,13 +111,17 @@ function groupByRarity(cards: DraftCardInstance[]) {
 
 interface PackDisplayProps {
   onCardHover: (info: CardHoverInfo | null) => void;
+  /** Show the "Auto-pick" button — Quick Draft only (no-op for P2P pods). */
+  showAutoPick?: boolean;
 }
 
-export function PackDisplay({ onCardHover }: PackDisplayProps) {
+export function PackDisplay({ onCardHover, showAutoPick = false }: PackDisplayProps) {
   const view = useDraftStore((s) => s.view);
   const selectedCard = useDraftStore((s) => s.selectedCard);
   const selectCard = useDraftStore((s) => s.selectCard);
   const confirmPick = useDraftStore((s) => s.confirmPick);
+  const autoPickCard = useDraftStore((s) => s.autoPickCard);
+  const [autoPicking, setAutoPicking] = useState(false);
 
   useEffect(() => {
     if (view?.current_pack?.length === 1 && !selectedCard) {
@@ -133,31 +141,56 @@ export function PackDisplay({ onCardHover }: PackDisplayProps) {
     );
   }
 
+  const handleAutoPick = async () => {
+    setAutoPicking(true);
+    try {
+      await autoPickCard();
+    } finally {
+      setAutoPicking(false);
+    }
+  };
+
   const sections = groupByRarity(pack);
 
   return (
     <div className="flex flex-col gap-4">
-      {sections.map(([rarity, cards]) => (
-        <div key={rarity}>
-          <h3
-            className={`mb-2 text-xs font-semibold uppercase tracking-wider ${RARITY_COLORS[rarity] ?? "text-white/50"}`}
+      <div className="flex items-center justify-between">
+        <span className="text-xs text-white/40">{pack.length} cards in pack</span>
+        {showAutoPick && (
+          <button
+            type="button"
+            onClick={handleAutoPick}
+            disabled={autoPicking}
+            className="rounded-lg border border-white/15 bg-white/[0.04] px-3 py-1 text-xs font-medium text-white/80 transition-colors hover:border-white/25 hover:bg-white/[0.08] disabled:cursor-not-allowed disabled:opacity-50"
           >
-            {RARITY_LABELS[rarity] ?? rarity}
-          </h3>
-          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5">
-            {cards.map((card) => (
-              <PackCard
-                key={card.instance_id}
-                card={card}
-                isSelected={selectedCard === card.instance_id}
-                onSelect={selectCard}
-                onConfirm={confirmPick}
-                onHover={onCardHover}
-              />
-            ))}
+            {autoPicking ? "Picking…" : "Auto-pick"}
+          </button>
+        )}
+      </div>
+      {sections.map(([rarity, cards]) => {
+        const rarityStyle = RARITY_STYLES[rarity] ?? RARITY_STYLE_FALLBACK;
+        return (
+          <div key={rarity}>
+            <h3
+              className={`mb-2 border-l-2 pl-2 text-xs font-semibold uppercase tracking-wider ${rarityStyle.text} ${rarityStyle.accent}`}
+            >
+              {RARITY_LABELS[rarity] ?? rarity}
+            </h3>
+            <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5">
+              {cards.map((card) => (
+                <PackCard
+                  key={card.instance_id}
+                  card={card}
+                  isSelected={selectedCard === card.instance_id}
+                  onSelect={selectCard}
+                  onConfirm={confirmPick}
+                  onHover={onCardHover}
+                />
+              ))}
+            </div>
           </div>
-        </div>
-      ))}
+        );
+      })}
     </div>
   );
 }

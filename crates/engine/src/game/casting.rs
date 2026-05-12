@@ -715,6 +715,25 @@ pub(super) fn exile_alt_cost_permission_supports_cast(
     }
 }
 
+pub(super) fn selected_exile_alt_cost_permission_accepts_resulting_mv(
+    state: &GameState,
+    object_id: ObjectId,
+    player: PlayerId,
+    resulting_mv: u32,
+) -> bool {
+    let Some(obj) = state.objects.get(&object_id) else {
+        return true;
+    };
+
+    let Some(permission) = obj.casting_permissions.iter().find(|permission| {
+        exile_alt_cost_permission_supports_cast(state, obj, player, permission, None)
+    }) else {
+        return true;
+    };
+
+    exile_alt_cost_permission_supports_cast(state, obj, player, permission, Some(resulting_mv))
+}
+
 pub(super) fn exile_alt_cost_permissions_accept_resulting_mv(
     state: &GameState,
     object_id: ObjectId,
