@@ -4490,6 +4490,10 @@ pub enum Effect {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         additional_modifications: Vec<ContinuousModification>,
     },
+    /// CR 702.116a: Myriad creates one tapped attacking copy token for each
+    /// opponent other than the defending player for the source creature, then
+    /// exiles those tokens at end of combat.
+    Myriad,
     /// CR 707.2 / CR 613.1a: Become a copy of target permanent.
     /// Sets copiable characteristics at Layer 1.
     BecomeCopy {
@@ -5956,6 +5960,7 @@ impl Effect {
             // --- Effects with no player-selectable target field ---
             // These use filters, zone-level operations, or have no targeting at all.
             Effect::StartYourEngines { .. }
+            | Effect::Myriad
             | Effect::IncreaseSpeed { .. }
             | Effect::GainLife { .. }
             | Effect::PumpAll { .. }
@@ -6100,6 +6105,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::SwitchPT { .. } => "SwitchPT",
         Effect::CopySpell { .. } => "CopySpell",
         Effect::CopyTokenOf { .. } => "CopyTokenOf",
+        Effect::Myriad => "Myriad",
         Effect::BecomeCopy { .. } => "BecomeCopy",
         Effect::ChooseCard { .. } => "ChooseCard",
         Effect::PutCounter { .. } => "PutCounter",
@@ -6268,6 +6274,7 @@ pub enum EffectKind {
     SwitchPT,
     CopySpell,
     CopyTokenOf,
+    Myriad,
     BecomeCopy,
     ChooseCard,
     PutCounter,
@@ -6436,6 +6443,7 @@ impl From<&Effect> for EffectKind {
             Effect::SwitchPT { .. } => EffectKind::SwitchPT,
             Effect::CopySpell { .. } => EffectKind::CopySpell,
             Effect::CopyTokenOf { .. } => EffectKind::CopyTokenOf,
+            Effect::Myriad => EffectKind::Myriad,
             Effect::BecomeCopy { .. } => EffectKind::BecomeCopy,
             Effect::ChooseCard { .. } => EffectKind::ChooseCard,
             Effect::PutCounter { .. } => EffectKind::PutCounter,

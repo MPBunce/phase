@@ -81,6 +81,7 @@ pub mod manifest;
 pub mod manifest_dread;
 pub mod mill;
 pub mod monstrosity;
+pub mod myriad;
 pub mod overload;
 pub mod pair_with;
 pub mod paradigm;
@@ -644,6 +645,7 @@ pub fn resolve_effect(
         Effect::SwitchPT { .. } => switch_pt::resolve(state, ability, events),
         Effect::CopySpell { .. } => copy_spell::resolve(state, ability, events),
         Effect::CopyTokenOf { .. } => token_copy::resolve(state, ability, events),
+        Effect::Myriad => myriad::resolve(state, ability, events),
         Effect::BecomeCopy { .. } => become_copy::resolve(state, ability, events),
         Effect::ChooseCard { .. } => choose_card::resolve(state, ability, events),
         Effect::PutCounter { .. } => counters::resolve_add(state, ability, events),

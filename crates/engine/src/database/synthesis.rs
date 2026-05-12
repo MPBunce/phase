@@ -130,6 +130,7 @@ impl KeywordTriggerInstaller {
                 "M1M1", "-1/-1", "702.79a",
             )],
             Keyword::Annihilator(n) => vec![build_annihilator_trigger(*n)],
+            Keyword::Myriad => vec![build_myriad_trigger()],
             Keyword::Soulbond => build_soulbond_triggers(),
             _ => Vec::new(),
         }
@@ -145,6 +146,7 @@ impl KeywordTriggerInstaller {
                 is_dies_return_with_counter_trigger(trigger, &CounterType::Minus1Minus1)
             }
             Keyword::Annihilator(_) => is_annihilator_attack_trigger(trigger),
+            Keyword::Myriad => is_myriad_attack_trigger(trigger),
             Keyword::Soulbond => is_soulbond_trigger(trigger),
             _ => false,
         }
@@ -1523,6 +1525,18 @@ pub fn synthesize_annihilator(face: &mut CardFace) {
     KeywordTriggerInstaller::install_matching(face, |kw| matches!(kw, Keyword::Annihilator(_)));
 }
 
+/// CR 702.116a: Myriad is an attack trigger. On resolution, the controller may
+/// create one tapped attacking copy token for each opponent other than the
+/// source creature's defending player; if any are created, they are exiled at
+/// end of combat. The resolver chooses the player branch of "that player or a
+/// planeswalker they control" until the engine has UI for that choice.
+///
+/// CR 702.116b: Multiple Myriad instances trigger separately, so one trigger is
+/// synthesized per `Keyword::Myriad` instance.
+pub fn synthesize_myriad(face: &mut CardFace) {
+    KeywordTriggerInstaller::install_matching(face, |kw| matches!(kw, Keyword::Myriad));
+}
+
 /// CR 702.95a + CR 115.10a: Soulbond represents two optional triggered
 /// abilities. One fires when the soulbond creature enters and can pair it with
 /// another unpaired creature you control; the other fires when another unpaired
@@ -1662,6 +1676,14 @@ fn is_annihilator_attack_trigger(t: &TriggerDefinition) -> bool {
     )
 }
 
+fn is_myriad_attack_trigger(t: &TriggerDefinition) -> bool {
+    matches!(t.mode, TriggerMode::Attacks)
+        && matches!(t.valid_card, Some(TargetFilter::SelfRef))
+        && t.execute.as_deref().is_some_and(|ability| {
+            ability.optional && matches!(ability.effect.as_ref(), Effect::Myriad)
+        })
+}
+
 fn is_echo_trigger(t: &TriggerDefinition) -> bool {
     matches!(t.mode, TriggerMode::PayEcho)
         && t.phase == Some(Phase::Upkeep)
@@ -1674,6 +1696,21 @@ fn is_echo_trigger(t: &TriggerDefinition) -> bool {
                 target: TargetFilter::SelfRef,
                 ..
             })
+        )
+}
+
+fn build_myriad_trigger() -> TriggerDefinition {
+    let execute = AbilityDefinition::new(AbilityKind::Spell, Effect::Myriad)
+        .optional()
+        .description(
+            "Create token copies for each opponent other than defending player".to_string(),
+        );
+
+    TriggerDefinition::new(TriggerMode::Attacks)
+        .valid_card(TargetFilter::SelfRef)
+        .execute(execute)
+        .description(
+            "CR 702.116a: Myriad — whenever this creature attacks, you may create tapped attacking copy tokens for each opponent other than defending player, then exile them at end of combat.".to_string(),
         )
 }
 
@@ -2471,6 +2508,11 @@ pub fn synthesize_all(face: &mut CardFace) {
     // separately. Defending player resolved per-attacker via
     // `ControllerRef::DefendingPlayer` (CR 508.5 / 508.5a).
     synthesize_annihilator(face);
+    // CR 702.116a: Myriad — attack trigger creating tapped attacking copy
+    // tokens for each opponent other than the source creature's defending
+    // player, exiled at end of combat. CR 702.116b: each instance triggers
+    // separately.
+    synthesize_myriad(face);
     // CR 702.95a: Soulbond — two optional ETB triggers that create pair
     // relationships under the resolution checks in CR 702.95c-d.
     synthesize_soulbond(face);
@@ -4884,6 +4926,195 @@ mod annihilator_runtime_tests {
             }
             other => panic!("expected EffectZoneChoice on P1, got {other:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod myriad_runtime_tests {
+    use super::*;
+    use crate::game::combat::AttackTarget;
+    use crate::game::printed_cards::apply_card_face_to_object;
+    use crate::game::zones::create_object;
+    use crate::types::actions::GameAction;
+    use crate::types::card_type::CoreType;
+    use crate::types::events::GameEvent;
+    use crate::types::format::FormatConfig;
+    use crate::types::game_state::{GameState, StackEntryKind, WaitingFor};
+    use crate::types::identifiers::{CardId, ObjectId};
+    use crate::types::phase::Phase;
+    use crate::types::player::PlayerId;
+
+    fn myriad_creature_face(name: &str, instances: usize) -> CardFace {
+        let mut face = CardFace {
+            name: name.to_string(),
+            power: Some(PtValue::Fixed(2)),
+            toughness: Some(PtValue::Fixed(2)),
+            keywords: vec![Keyword::Myriad; instances],
+            ..CardFace::default()
+        };
+        face.card_type.core_types.push(CoreType::Creature);
+        synthesize_all(&mut face);
+        face
+    }
+
+    fn setup_attack_state(player_count: u8, face: &CardFace) -> (GameState, ObjectId) {
+        let mut state = GameState::new(FormatConfig::standard(), player_count, 42);
+        state.turn_number = 2;
+        state.phase = Phase::DeclareAttackers;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::DeclareAttackers {
+            player: PlayerId(0),
+            valid_attacker_ids: vec![],
+            valid_attack_targets: vec![],
+        };
+
+        let card_id = CardId(state.next_object_id);
+        let attacker_id = create_object(
+            &mut state,
+            card_id,
+            PlayerId(0),
+            face.name.clone(),
+            Zone::Battlefield,
+        );
+        {
+            let attacker = state.objects.get_mut(&attacker_id).unwrap();
+            apply_card_face_to_object(attacker, face);
+            attacker.entered_battlefield_turn = Some(1);
+        }
+        (state, attacker_id)
+    }
+
+    fn declare_attack(state: &mut GameState, attacker_id: ObjectId, defender: PlayerId) {
+        crate::game::engine::apply_as_current(
+            state,
+            GameAction::DeclareAttackers {
+                attacks: vec![(attacker_id, AttackTarget::Player(defender))],
+            },
+        )
+        .expect("declare Myriad attacker");
+    }
+
+    fn resolve_myriad_trigger(state: &mut GameState) {
+        let mut events = Vec::new();
+        crate::game::stack::resolve_top(state, &mut events);
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::OptionalEffectChoice { .. }
+        ));
+        crate::game::engine::apply_as_current(
+            state,
+            GameAction::DecideOptionalEffect { accept: true },
+        )
+        .expect("accept Myriad trigger");
+    }
+
+    fn myriad_tokens(state: &GameState, source_name: &str) -> Vec<ObjectId> {
+        state
+            .objects
+            .iter()
+            .filter_map(|(id, obj)| {
+                (obj.is_token && obj.name == source_name && obj.zone == Zone::Battlefield)
+                    .then_some(*id)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn myriad_three_player_attack_creates_token_attacking_other_opponent_and_exiles_at_eoc() {
+        let face = myriad_creature_face("Blade of Selves Bear", 1);
+        let (mut state, attacker_id) = setup_attack_state(3, &face);
+
+        declare_attack(&mut state, attacker_id, PlayerId(1));
+        assert_eq!(state.stack.len(), 1, "Myriad attack trigger goes on stack");
+
+        resolve_myriad_trigger(&mut state);
+
+        let tokens = myriad_tokens(&state, &face.name);
+        assert_eq!(tokens.len(), 1, "3-player Myriad creates one token");
+        let token_id = tokens[0];
+        let token = state.objects.get(&token_id).unwrap();
+        assert!(token.tapped, "Myriad token enters tapped");
+
+        let token_attacker = state
+            .combat
+            .as_ref()
+            .unwrap()
+            .attackers
+            .iter()
+            .find(|attacker| attacker.object_id == token_id)
+            .expect("Myriad token is attacking");
+        assert_eq!(token_attacker.defending_player, PlayerId(2));
+        assert_eq!(
+            token_attacker.attack_target,
+            AttackTarget::Player(PlayerId(2))
+        );
+
+        assert_eq!(
+            state.delayed_triggers.len(),
+            1,
+            "EOC exile trigger scheduled"
+        );
+        let delayed_targets = &state.delayed_triggers[0].ability.targets;
+        assert_eq!(
+            delayed_targets,
+            &vec![crate::types::ability::TargetRef::Object(token_id)]
+        );
+
+        let eoc_events = crate::game::triggers::check_delayed_triggers(
+            &mut state,
+            &[GameEvent::PhaseChanged {
+                phase: Phase::EndCombat,
+            }],
+        );
+        assert!(!eoc_events.is_empty(), "EOC delayed trigger fires");
+        let mut resolve_events = Vec::new();
+        crate::game::stack::resolve_top(&mut state, &mut resolve_events);
+        assert_eq!(state.objects.get(&token_id).unwrap().zone, Zone::Exile);
+    }
+
+    #[test]
+    fn myriad_two_player_attack_creates_no_token() {
+        let face = myriad_creature_face("Duke Ulder's Cub", 1);
+        let (mut state, attacker_id) = setup_attack_state(2, &face);
+
+        declare_attack(&mut state, attacker_id, PlayerId(1));
+        assert_eq!(state.stack.len(), 1, "Myriad still triggers in two-player");
+
+        resolve_myriad_trigger(&mut state);
+
+        assert!(myriad_tokens(&state, &face.name).is_empty());
+        assert!(
+            state.delayed_triggers.is_empty(),
+            "no EOC cleanup trigger is scheduled when no tokens are created"
+        );
+    }
+
+    #[test]
+    fn multiple_myriad_instances_create_independent_token_sets() {
+        let face = myriad_creature_face("Echoing Myriad Bear", 2);
+        let (mut state, attacker_id) = setup_attack_state(3, &face);
+
+        declare_attack(&mut state, attacker_id, PlayerId(1));
+        let trigger_count = state
+            .stack
+            .iter()
+            .filter(|entry| matches!(entry.kind, StackEntryKind::TriggeredAbility { .. }))
+            .count();
+        assert_eq!(
+            trigger_count, 2,
+            "CR 702.116b: each Myriad instance triggers"
+        );
+
+        resolve_myriad_trigger(&mut state);
+        resolve_myriad_trigger(&mut state);
+
+        assert_eq!(
+            myriad_tokens(&state, &face.name).len(),
+            2,
+            "each Myriad trigger creates its own token"
+        );
+        assert_eq!(state.delayed_triggers.len(), 2);
     }
 }
 
