@@ -4,12 +4,10 @@
 // surfaces a fail-loud prompt so the user can concede out instead of
 // silently hanging on an orphan state.
 //
-// Adding a new WaitingFor variant on the engine side REQUIRES adding it
-// here and wiring a corresponding modal/overlay in GamePage. Engine-only
-// variants not yet present in the TS WaitingFor union (e.g.
-// MultiTargetSelection, ChoosePermanentTypeSlot variants reached but not
-// typed) are also caught — they're absent from this set and therefore
-// surface the diagnostic.
+// Adding a new player-facing WaitingFor variant on the engine side REQUIRES
+// adding it here and wiring a corresponding modal/overlay in GamePage. Variants
+// present in the TS WaitingFor union but absent from this set deliberately
+// surface the diagnostic modal instead of silently hanging.
 
 import type { WaitingFor } from "../adapter/types";
 

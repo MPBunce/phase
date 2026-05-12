@@ -14,6 +14,51 @@ const ADAPTER_FILES = [
   "index.ts",
 ];
 
+function repoRoot(): string {
+  return resolve(dirname(fileURLToPath(import.meta.url)), "../../../..");
+}
+
+function rustEnumVariants(source: string, enumName: string): string[] {
+  const enumStart = source.indexOf(`pub enum ${enumName}`);
+  expect(enumStart, `${enumName} enum should exist`).toBeGreaterThanOrEqual(0);
+
+  const bodyStart = source.indexOf("{", enumStart);
+  expect(bodyStart, `${enumName} enum body should start`).toBeGreaterThanOrEqual(0);
+
+  let depth = 0;
+  for (let index = bodyStart; index < source.length; index += 1) {
+    if (source[index] === "{") depth += 1;
+    if (source[index] === "}") {
+      depth -= 1;
+      if (depth === 0) {
+        return Array.from(
+          source
+            .slice(bodyStart + 1, index)
+            .matchAll(/^ {4}([A-Z][A-Za-z0-9]+)\s*(?:\{|,)/gm),
+          (match) => match[1],
+        );
+      }
+    }
+  }
+
+  throw new Error(`${enumName} enum body should close`);
+}
+
+function tsUnionVariantTypes(source: string, typeName: string, followingHeader: string): string[] {
+  const unionStart = source.indexOf(`export type ${typeName} =`);
+  expect(unionStart, `${typeName} union should exist`).toBeGreaterThanOrEqual(0);
+
+  const unionEnd = source.indexOf(followingHeader, unionStart);
+  expect(unionEnd, `${typeName} union should end before ${followingHeader}`).toBeGreaterThan(
+    unionStart,
+  );
+
+  return Array.from(
+    source.slice(unionStart, unionEnd).matchAll(/type: "([A-Z][A-Za-z0-9]+)"/g),
+    (match) => match[1],
+  );
+}
+
 describe("adapter boundary guardrails", () => {
   it("adapter modules do not import stores or use localStorage directly", () => {
     const adapterDir = dirname(fileURLToPath(import.meta.url));
@@ -22,5 +67,19 @@ describe("adapter boundary guardrails", () => {
       expect(source).not.toMatch(/from "\.\.\/stores\//);
       expect(source).not.toContain("localStorage");
     }
+  });
+
+  it("keeps the frontend WaitingFor union in lockstep with the engine enum", () => {
+    const root = repoRoot();
+    const rustSource = readFileSync(
+      resolve(root, "crates/engine/src/types/game_state.rs"),
+      "utf8",
+    );
+    const tsSource = readFileSync(resolve(root, "client/src/adapter/types.ts"), "utf8");
+
+    const rustVariants = rustEnumVariants(rustSource, "WaitingFor");
+    const tsVariants = tsUnionVariantTypes(tsSource, "WaitingFor", "// ── Learn");
+
+    expect(new Set(tsVariants)).toEqual(new Set(rustVariants));
   });
 });

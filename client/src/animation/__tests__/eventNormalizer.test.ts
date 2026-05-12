@@ -17,7 +17,7 @@ describe("normalizeEvents", () => {
       { type: "ManaAdded", data: { player_id: 0, mana_type: "White", source_id: 1 } },
       { type: "DamageCleared", data: { object_id: 1 } },
       { type: "CardsDrawn", data: { player_id: 0, count: 1 } },
-      { type: "CardDrawn", data: { player_id: 0, object_id: 1 } },
+      { type: "CardDrawn", data: { player_id: 0, object_id: 1, nth_in_turn: 1, nth_in_step: 1 } },
       { type: "PermanentTapped", data: { object_id: 1 } },
       { type: "PermanentUntapped", data: { object_id: 1 } },
     ];

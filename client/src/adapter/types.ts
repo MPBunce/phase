@@ -754,8 +754,10 @@ export type WaitingFor =
   | { type: "ModalFaceChoice"; data: { player: PlayerId; object_id: ObjectId; card_id: CardId } }
   | { type: "WarpCostChoice"; data: { player: PlayerId; object_id: ObjectId; card_id: CardId; normal_cost: ManaCost; warp_cost: ManaCost } }
   | { type: "EvokeCostChoice"; data: { player: PlayerId; object_id: ObjectId; card_id: CardId; normal_cost: ManaCost; evoke_cost: ManaCost } }
+  | { type: "OverloadCostChoice"; data: { player: PlayerId; object_id: ObjectId; card_id: CardId; normal_cost: ManaCost; overload_cost: ManaCost } }
   | { type: "BestowCostChoice"; data: { player: PlayerId; object_id: ObjectId; card_id: CardId; normal_cost: ManaCost; bestow_cost: ManaCost } }
   | { type: "ChoosePermanentTypeSlot"; data: { player: PlayerId; object_id: ObjectId; card_id: CardId; source: ObjectId; available_slots: CoreType[] } }
+  | { type: "MultiTargetSelection"; data: { player: PlayerId; legal_targets: ObjectId[]; min_targets: number; max_targets: number; pending_ability: unknown } }
   | { type: "MiracleReveal"; data: { player: PlayerId; object_id: ObjectId; cost: ManaCost } }
   | { type: "MiracleCastOffer"; data: { player: PlayerId; object_id: ObjectId; cost: ManaCost } }
   | { type: "MadnessCastOffer"; data: { player: PlayerId; object_id: ObjectId; cost: ManaCost } }
@@ -765,6 +767,10 @@ export type WaitingFor =
   | { type: "BlightChoice"; data: { player: PlayerId; count: number; creatures: ObjectId[]; pending_cast: PendingCast } }
   | { type: "BeholdForCost"; data: { player: PlayerId; count: number; choices: ObjectId[]; action: "ChooseOrReveal" | "ExileChosen"; pending_cast: PendingCast } }
   | { type: "TapCreaturesForManaAbility"; data: { player: PlayerId; count: number; creatures: ObjectId[]; pending_mana_ability: unknown } }
+  | { type: "DiscardForManaAbility"; data: { player: PlayerId; count: number; cards: ObjectId[]; pending_mana_ability: unknown } }
+  | { type: "ExileFromBattlefieldForManaAbility"; data: { player: PlayerId; count: number; permanents: ObjectId[]; pending_mana_ability: unknown } }
+  | { type: "SacrificeForManaAbility"; data: { player: PlayerId; count: number; permanents: ObjectId[]; pending_mana_ability: unknown } }
+  | { type: "PayManaAbilityMana"; data: { player: PlayerId; options: ManaType[][]; pending_mana_ability: unknown } }
   | { type: "ChooseManaColor"; data: { player: PlayerId; choice: ManaChoicePrompt; context: unknown } }
   | { type: "TapCreaturesForSpellCost"; data: { player: PlayerId; count: number; creatures: ObjectId[]; pending_cast: PendingCast } }
   | { type: "ExileForCost"; data: { player: PlayerId; zone: ExileCostSourceZone; count: number; cards: ObjectId[]; pending_cast: PendingCast } }
@@ -781,6 +787,8 @@ export type WaitingFor =
   | { type: "DiscoverChoice"; data: { player: PlayerId; hit_card: ObjectId; exiled_misses: ObjectId[] } }
   | { type: "CascadeChoice"; data: { player: PlayerId; hit_card: ObjectId; exiled_misses: ObjectId[]; source_mv: number } }
   | { type: "TopOrBottomChoice"; data: { player: PlayerId; object_id: ObjectId } }
+  | { type: "ParadigmCastOffer"; data: { player: PlayerId; offers: ObjectId[] } }
+  | { type: "PopulateChoice"; data: { player: PlayerId; source_id: ObjectId; valid_tokens: ObjectId[] } }
   | { type: "CompanionReveal"; data: { player: PlayerId; eligible_companions: [string, number][] } }
   | { type: "ChooseLegend"; data: { player: PlayerId; legend_name: string; candidates: ObjectId[] } }
   | { type: "CommanderZoneChoice"; data: { player: PlayerId; commander_id: ObjectId; current_zone: string } }
@@ -811,6 +819,7 @@ export type WaitingFor =
   | { type: "DrawnThisTurnTopdeckChoice"; data: { player: PlayerId; cards: ObjectId[]; count: number; min_count: number; life_payment: number; source_id: ObjectId } }
   | { type: "RetargetChoice"; data: { player: PlayerId; stack_entry_index: number; scope: RetargetScope; current_targets: TargetRef[]; legal_new_targets: TargetRef[] } }
   | { type: "ProliferateChoice"; data: { player: PlayerId; eligible: TargetRef[] } }
+  | { type: "CopyRetarget"; data: { player: PlayerId; copy_id: ObjectId; target_slots: { current: TargetRef; legal_alternatives: TargetRef[] }[] } }
   | { type: "ConniveDiscard"; data: { player: PlayerId; conniver_id: ObjectId; source_id: ObjectId; cards: ObjectId[]; count: number } }
   | { type: "DiscardChoice"; data: { player: PlayerId; count: number; cards: ObjectId[]; source_id: ObjectId; effect_kind: string; up_to?: boolean; unless_filter?: TargetFilter } }
   | { type: "ManifestDreadChoice"; data: { player: PlayerId; cards: ObjectId[] } }
@@ -966,6 +975,7 @@ export type GameAction =
   | { type: "ChooseModalFace"; data: { back_face: boolean } }
   | { type: "ChooseWarpCost"; data: { use_warp: boolean } }
   | { type: "ChooseEvokeCost"; data: { use_evoke: boolean } }
+  | { type: "ChooseOverloadCost"; data: { use_overload: boolean } }
   | { type: "ChooseBestowCost"; data: { use_bestow: boolean } }
   | { type: "ChoosePermanentTypeSlot"; data: { slot: CoreType } }
   | { type: "CastSpellAsMiracle"; data: { object_id: ObjectId; card_id: CardId } }
@@ -1005,6 +1015,10 @@ export type GameAction =
   | { type: "SubmitPayAmount"; data: { amount: number } }
   | { type: "SubmitPhyrexianChoices"; data: { choices: ShardChoice[] } }
   | { type: "ChooseManaColor"; data: { choice: ManaChoice } }
+  | { type: "PayManaAbilityMana"; data: { payment: ManaType[] } }
+  | { type: "CastPreparedCopy"; data: { source: ObjectId } }
+  | { type: "CastParadigmCopy"; data: { source: ObjectId } }
+  | { type: "PassParadigmOffer" }
   | { type: "Debug"; data: DebugAction }
   | { type: "GrantDebugPermission"; data: { player_id: PlayerId } }
   | { type: "RevokeDebugPermission"; data: { player_id: PlayerId } };
@@ -1057,7 +1071,7 @@ export type GameEvent =
   | { type: "PlayerLost"; data: { player_id: PlayerId } }
   | { type: "MulliganStarted" }
   | { type: "CardsDrawn"; data: { player_id: PlayerId; count: number } }
-  | { type: "CardDrawn"; data: { player_id: PlayerId; object_id: ObjectId } }
+  | { type: "CardDrawn"; data: { player_id: PlayerId; object_id: ObjectId; nth_in_turn: number; nth_in_step: number } }
   | { type: "PermanentUntapped"; data: { object_id: ObjectId } }
   | { type: "LandPlayed"; data: { object_id: ObjectId; player_id: PlayerId } }
   | { type: "StackPushed"; data: { object_id: ObjectId } }
