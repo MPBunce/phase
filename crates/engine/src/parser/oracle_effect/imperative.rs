@@ -3640,6 +3640,7 @@ pub(super) fn parse_exile_ast(
             origin,
             target,
             all: true,
+            enter_with_counters: vec![],
         });
     }
 
@@ -3663,20 +3664,32 @@ pub(super) fn parse_exile_ast(
             origin,
             target,
             all: true,
+            enter_with_counters: vec![],
         });
     }
 
-    if let Ok((_, (_, filter_text))) = (
+    // "exile <filter> from your hand [with <counter suffix>]"
+    // Mirror the original arm's `terminated(take_until, tag)`; the ONLY change
+    // vs. the original is dropping the trailing `eof` from the terminator so a
+    // post-hand tail is allowed. `terminated` returns the `take_until` slice
+    // (the card filter) and consumes " from your hand"; the parser remainder
+    // (`after_hand`) is the post-hand tail.
+    if let Ok((after_hand, (_, filter_text))) = (
         opt(nom_primitives::parse_article),
-        terminated(
-            take_until(" from your hand"),
-            (tag(" from your hand"), opt(tag(".")), eof),
-        ),
+        terminated(take_until(" from your hand"), tag(" from your hand")),
     )
         .parse(rest_lower)
     {
         let (mut target, rem) = parse_type_phrase(filter_text.trim());
-        if rem.trim().is_empty() && !matches!(target, TargetFilter::Any) {
+        // `after_hand` is the parser remainder AFTER "from your hand": empty/"."
+        // (no-tail case) or " with a number of … counters on it equal to …".
+        let enter_with_counters = super::parse_with_counters_suffix(after_hand);
+        let tail_clean = after_hand.trim().trim_start_matches('.').trim();
+        // Guard against silently dropping an unrecognized trailing clause: the
+        // arm declines unless the tail is empty or fully consumed as a counter
+        // suffix. An unconsumed tail falls through to the generic exile path.
+        let tail_is_consumed = tail_clean.is_empty() || !enter_with_counters.is_empty();
+        if rem.trim().is_empty() && !matches!(target, TargetFilter::Any) && tail_is_consumed {
             attach_controller_if_absent(&mut target, ControllerRef::You);
             if let TargetFilter::Typed(typed) = &mut target {
                 typed
@@ -3687,6 +3700,7 @@ pub(super) fn parse_exile_ast(
                 origin: Some(Zone::Hand),
                 target,
                 all: false,
+                enter_with_counters,
             });
         }
     }
@@ -3710,6 +3724,7 @@ pub(super) fn parse_exile_ast(
         origin,
         target,
         all: false,
+        enter_with_counters: vec![],
     })
 }
 
@@ -5528,8 +5543,12 @@ pub(super) fn lower_zone_counter_ast(ast: ZoneCounterImperativeAst) -> Effect {
             origin,
             target,
             all,
+            enter_with_counters,
         } => {
             if all {
+                // `ChangeZoneAll` has no counter slot; mass exile never carries
+                // a "with counters" clause (all five non-from-hand construction
+                // sites pass `vec![]`).
                 Effect::ChangeZoneAll {
                     origin,
                     destination: Zone::Exile,
@@ -5547,7 +5566,7 @@ pub(super) fn lower_zone_counter_ast(ast: ZoneCounterImperativeAst) -> Effect {
                     enter_tapped: false,
                     enters_attacking: false,
                     up_to: false,
-                    enter_with_counters: vec![],
+                    enter_with_counters,
                 }
             }
         }
@@ -6153,11 +6172,13 @@ mod tests {
             origin: Some(Zone::Hand),
             target: TargetFilter::Typed(filter),
             all: false,
+            enter_with_counters,
         }) = result
         else {
             panic!("{input}: expected hand-origin typed exile, got {result:?}");
         };
 
+        assert!(enter_with_counters.is_empty());
         assert_eq!(filter.controller, Some(ControllerRef::You));
         assert!(filter.type_filters.contains(&TypeFilter::Card));
         assert!(filter
@@ -6183,6 +6204,7 @@ mod tests {
                 origin: Some(Zone::Hand),
                 target: TargetFilter::Typed(filter),
                 all: false,
+                enter_with_counters: _,
             }) = result
             else {
                 panic!("{input}: expected hand-origin typed exile, got {result:?}");
@@ -6194,6 +6216,67 @@ mod tests {
                 .properties
                 .contains(&FilterProp::InZone { zone: Zone::Hand }));
         }
+    }
+
+    #[test]
+    fn parse_exile_from_hand_with_dynamic_counter_suffix() {
+        use crate::types::ability::{ObjectScope, QuantityExpr, QuantityRef, TypeFilter};
+        use crate::types::counter::CounterType;
+        // The Eleventh Doctor: "exile a card from your hand with a number of
+        // time counters on it equal to its mana value."
+        let input =
+            "exile a card from your hand with a number of time counters on it equal to its mana value";
+        let lower = input.to_lowercase();
+        let result = parse_zone_counter_ast(input, &lower, &mut ParseContext::default());
+        let Some(ZoneCounterImperativeAst::Exile {
+            origin: Some(Zone::Hand),
+            target: TargetFilter::Typed(filter),
+            all: false,
+            enter_with_counters,
+        }) = result
+        else {
+            panic!("{input}: expected hand-origin typed exile, got {result:?}");
+        };
+        assert_eq!(filter.controller, Some(ControllerRef::You));
+        assert!(filter.type_filters.contains(&TypeFilter::Card));
+        assert!(filter
+            .properties
+            .contains(&FilterProp::InZone { zone: Zone::Hand }));
+        assert_eq!(
+            enter_with_counters,
+            vec![(
+                CounterType::Time,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectManaValue {
+                        scope: ObjectScope::Recipient,
+                    },
+                },
+            )],
+        );
+    }
+
+    #[test]
+    fn parse_exile_from_hand_unrecognized_tail_attributes_no_counters() {
+        // Negative: an unrecognized `with …` tail that is NOT a counter suffix
+        // makes the from-hand arm's `tail_is_consumed` guard fail, so the arm
+        // declines and the parse falls through to the generic exile path.
+        // The key invariant: an unrecognized tail must NEVER be misinterpreted
+        // as a counter suffix — `enter_with_counters` stays empty regardless of
+        // which arm produces the AST.
+        let input = "exile a card from your hand with flying";
+        let lower = input.to_lowercase();
+        let result = parse_zone_counter_ast(input, &lower, &mut ParseContext::default());
+        let Some(ZoneCounterImperativeAst::Exile {
+            enter_with_counters,
+            ..
+        }) = result
+        else {
+            panic!("{input}: expected an Exile AST, got {result:?}");
+        };
+        assert!(
+            enter_with_counters.is_empty(),
+            "unrecognized `with` tail must not yield counters: {enter_with_counters:?}"
+        );
     }
 
     #[test]

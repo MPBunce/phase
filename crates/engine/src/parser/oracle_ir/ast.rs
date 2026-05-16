@@ -913,6 +913,10 @@ pub(crate) enum ZoneCounterImperativeAst {
         origin: Option<Zone>,
         target: TargetFilter,
         all: bool,
+        /// CR 122.1 + CR 614.1c: counters the exiled object enters Exile with
+        /// ("exile a card … with N <type> counters on it"). Empty for the
+        /// common no-counter case. Mirrors `Effect::ChangeZone.enter_with_counters`.
+        enter_with_counters: Vec<(CounterType, QuantityExpr)>,
     },
     ExileTop {
         player: TargetFilter,

@@ -5593,6 +5593,7 @@ fn try_parse_verb_and_target<'a>(
                 origin,
                 target,
                 all: true,
+                enter_with_counters: vec![],
             })),
             rem,
         ));
@@ -5613,6 +5614,7 @@ fn try_parse_verb_and_target<'a>(
                 origin,
                 target,
                 all: false,
+                enter_with_counters: vec![],
             })),
             rem,
         ));
@@ -14043,7 +14045,7 @@ fn parse_signed_pt_component(text: &str) -> Option<PtValue> {
 /// two additional +1/+1 counters on it") without the caller having to
 /// pre-trim. The body combinator gates on `tag("with ")` then dispatches to
 /// `parse_counter_suffix_body`.
-fn parse_with_counters_suffix(lower: &str) -> Vec<(CounterType, QuantityExpr)> {
+pub(crate) fn parse_with_counters_suffix(lower: &str) -> Vec<(CounterType, QuantityExpr)> {
     nom_primitives::scan_preceded(lower, |i| {
         let (i, _) = tag::<_, _, OracleError<'_>>("with ").parse(i)?;
         parse_counter_suffix_body_combinator(i)
@@ -14061,6 +14063,17 @@ fn parse_with_counters_suffix(lower: &str) -> Vec<(CounterType, QuantityExpr)> {
 pub(crate) fn parse_counter_suffix_body_combinator(
     input: &str,
 ) -> nom::IResult<&str, (CounterType, QuantityExpr), OracleError<'_>> {
+    // Count axis: dynamic "a number of … equal to <quantity>" FIRST, then the
+    // fixed-number form. ORDER IS LOAD-BEARING: `parse_number` consumes the bare
+    // article "a" as 1 (oracle_nom/primitives.rs:108/118), so the fixed path
+    // would mis-parse "a number of …" by consuming "a" as count 1 and treating
+    // "number of <type>" as the counter-type token. The dynamic arm gates on the
+    // longer, more specific `tag("a number of ")`. A future `alt()` refactor
+    // MUST keep dynamic before fixed for the same reason.
+    if let Ok((rest, body)) = parse_dynamic_counter_suffix_body(input) {
+        return Ok((rest, body));
+    }
+
     // Count: digits, English word, or article ("a"/"an").
     let (rest, count) = nom_primitives::parse_number.parse(input)?;
     let (rest, _) = tag(" ").parse(rest)?;
@@ -14088,6 +14101,29 @@ pub(crate) fn parse_counter_suffix_body_combinator(
             },
         ),
     ))
+}
+
+/// CR 122.1 + CR 202.3: "a number of <type> counter(s) on it equal to
+/// <quantity>" — dynamic counter count for "enters with counters" clauses
+/// (e.g. The Eleventh Doctor: "with a number of time counters on it equal to
+/// its mana value"). Delegates the quantity to the shared `parse_quantity_ref`
+/// building block so any "with a number of X counters equal to …" card parses.
+fn parse_dynamic_counter_suffix_body(
+    input: &str,
+) -> nom::IResult<&str, (CounterType, QuantityExpr), OracleError<'_>> {
+    let (rest, _) = tag("a number of ").parse(input)?;
+    let (rest, type_token) = take_until(" counter").parse(rest)?;
+    let counter_type = crate::types::counter::parse_counter_type(type_token);
+    let (rest, _) = tag(" counter").parse(rest)?;
+    let (rest, _) = nom::combinator::opt(tag::<_, _, OracleError<'_>>("s")).parse(rest)?;
+    let (rest, _) = tag(" on it equal to ").parse(rest)?;
+    // Quantity: delegate to the shared quantity-ref combinator. Consume the
+    // full clause (including any trailing period) so callers see it consumed.
+    let qty_text = rest.trim_end_matches('.').trim_end();
+    let qty = crate::parser::oracle_quantity::parse_quantity_ref(qty_text).ok_or(
+        nom::Err::Error(OracleError::new(rest, nom::error::ErrorKind::Verify)),
+    )?;
+    Ok(("", (counter_type, QuantityExpr::Ref { qty })))
 }
 
 fn try_parse_put_zone_change(lower: &str, text: &str) -> Option<Effect> {
@@ -14855,6 +14891,37 @@ mod tests {
     use crate::types::keywords::Keyword;
     use crate::types::mana::{ManaColor, ManaExpiry};
     use crate::types::player::PlayerCounterKind;
+
+    #[test]
+    fn counter_suffix_body_fixed_count_regression() {
+        // Regression: the fixed-count path still parses after the dynamic arm
+        // was prepended.
+        let (rest, (counter, count)) =
+            parse_counter_suffix_body_combinator("two +1/+1 counters on it").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(counter, crate::types::counter::CounterType::Plus1Plus1);
+        assert_eq!(count, QuantityExpr::Fixed { value: 2 });
+    }
+
+    #[test]
+    fn counter_suffix_body_dynamic_count_parses_its_mana_value() {
+        // CR 122.1 + CR 202.3: "a number of time counters on it equal to its
+        // mana value" → a `Recipient`-scoped object-mana-value reference.
+        let (rest, (counter, count)) = parse_counter_suffix_body_combinator(
+            "a number of time counters on it equal to its mana value",
+        )
+        .unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(counter, crate::types::counter::CounterType::Time);
+        assert_eq!(
+            count,
+            QuantityExpr::Ref {
+                qty: QuantityRef::ObjectManaValue {
+                    scope: ObjectScope::Recipient,
+                },
+            },
+        );
+    }
 
     #[test]
     fn dynamic_energy_unless_cost_parses_its_mana_value() {
