@@ -36,8 +36,16 @@ pub(super) fn handle_optional_effect_choice(
         } else {
             AutoMayChoice::Decline
         };
-        effects::resolve_optional_effect_decision(state, *ability, choice, events, 1)
-            .map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
+        // CR 608.2: an ability's resolution is a single process; a triggered
+        // ability suspended for its optional ("may") decision retains its
+        // triggering event context. Restore it for the resumed resolution so
+        // `TriggeringPlayer` and other event-context refs resolve correctly.
+        let pending_event = state.pending_optional_trigger_event.take();
+        let previous_trigger_event = state.current_trigger_event.clone();
+        state.current_trigger_event = pending_event;
+        let result = effects::resolve_optional_effect_decision(state, *ability, choice, events, 1);
+        state.current_trigger_event = previous_trigger_event;
+        result.map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
     }
 
     resume_pending_continuation_if_priority(state, events)?;

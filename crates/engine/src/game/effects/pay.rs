@@ -159,8 +159,52 @@ pub fn resolve(
         PaymentCost::AbilityCost { cost } => {
             resolve_ability_cost_payment(state, &payment_ability, payer, cost, events)?;
         }
+        // CR 118.1 + CR 118.5: Per-object scaled mana cost. The `base` cost
+        // (which may carry colored pips) is multiplied by `times`; when
+        // `times` resolves to 0 the scaled cost is `{0}` — paid trivially as a
+        // no-op SUCCESS (the empty selection IS the acknowledgment), never a
+        // payment failure.
+        PaymentCost::ScaledMana { base, times } => {
+            let times = resolve_quantity_with_targets(state, times, &payment_ability).max(0);
+            let times = u32::try_from(times).unwrap_or(0);
+            let scaled = scale_mana_cost(base, times);
+            if !casting::can_pay_effect_mana_cost_after_auto_tap(
+                state,
+                payer,
+                ability.source_id,
+                &scaled,
+            ) {
+                state.cost_payment_failed_flag = true;
+                return Ok(());
+            }
+            if casting::pay_effect_mana_cost(state, payer, ability.source_id, &scaled, events)
+                .is_err()
+            {
+                state.cost_payment_failed_flag = true;
+            }
+        }
     }
     Ok(())
+}
+
+/// CR 118.1: Multiply a `ManaCost` by `times` — every shard is repeated
+/// `times` times and the generic component scaled. `times == 0` yields `{0}`
+/// (`Cost { shards: [], generic: 0 }`), which the existing mana-payment path
+/// treats as trivially paid.
+fn scale_mana_cost(base: &ManaCost, times: u32) -> ManaCost {
+    match base {
+        ManaCost::NoCost | ManaCost::SelfManaCost => ManaCost::zero(),
+        ManaCost::Cost { shards, generic } => {
+            let mut scaled_shards = Vec::with_capacity(shards.len() * times as usize);
+            for _ in 0..times {
+                scaled_shards.extend(shards.iter().copied());
+            }
+            ManaCost::Cost {
+                shards: scaled_shards,
+                generic: generic.saturating_mul(times),
+            }
+        }
+    }
 }
 
 fn resolve_ability_cost_payment(
@@ -1524,5 +1568,48 @@ mod tests {
                 .any(|e| matches!(e, GameEvent::LifeChanged { .. })),
             "no LifeChanged event should be emitted"
         );
+    }
+
+    // CR 118.1: ScaledMana base-cost multiplication — colored-pip and
+    // generic-only bases scale uniformly; `times == 0` yields `{0}`.
+    #[test]
+    fn scale_mana_cost_repeats_colored_pip() {
+        // Thelon's Curse: {U} × 3 → {U}{U}{U}.
+        let base = ManaCost::Cost {
+            shards: vec![ManaCostShard::Blue],
+            generic: 0,
+        };
+        let scaled = scale_mana_cost(&base, 3);
+        assert_eq!(
+            scaled,
+            ManaCost::Cost {
+                shards: vec![
+                    ManaCostShard::Blue,
+                    ManaCostShard::Blue,
+                    ManaCostShard::Blue
+                ],
+                generic: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn scale_mana_cost_scales_generic() {
+        // Magnetic Mountain: {4} × 2 → {8}.
+        let scaled = scale_mana_cost(&ManaCost::generic(4), 2);
+        assert_eq!(scaled, ManaCost::generic(8));
+    }
+
+    #[test]
+    fn scale_mana_cost_zero_times_is_empty() {
+        // CR 118.5: {4} × 0 → {0} — trivially paid (no resources required).
+        let scaled = scale_mana_cost(&ManaCost::generic(4), 0);
+        assert_eq!(scaled, ManaCost::zero());
+        // Colored base × 0 also collapses to {0}.
+        let colored = ManaCost::Cost {
+            shards: vec![ManaCostShard::Blue],
+            generic: 0,
+        };
+        assert_eq!(scale_mana_cost(&colored, 0), ManaCost::zero());
     }
 }

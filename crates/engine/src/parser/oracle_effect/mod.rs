@@ -47,8 +47,8 @@ use crate::types::ability::{
     CombatDamageScope, Comparator, ConjureCard, ContinuousModification, ControllerRef,
     DamageModification, DamageSource, DelayedTriggerCondition, Duration, Effect, FilterProp,
     GainLifePlayer, GameRestriction, ManaProduction, ManaSpendPermission, MultiTargetSpec,
-    ObjectProperty, ObjectScope, PlayerFilter, PlayerScope, PreventionAmount, PreventionScope,
-    PtValue, QuantityExpr, QuantityRef, ReplacementDefinition, RestrictionExpiry,
+    ObjectProperty, ObjectScope, PaymentCost, PlayerFilter, PlayerScope, PreventionAmount,
+    PreventionScope, PtValue, QuantityExpr, QuantityRef, ReplacementDefinition, RestrictionExpiry,
     RestrictionPlayerScope, RoundingMode, StaticCondition, StaticDefinition, TargetChoiceTiming,
     TargetFilter, TargetSelectionMode, TriggerCondition, TriggerDefinition, TypeFilter,
     TypedFilter, UnlessPayModifier, UntilCondition,
@@ -2359,6 +2359,121 @@ fn try_parse_for_each_copy_token_source(
     }))
 }
 
+/// CR 603.7e + CR 118.1: Detect the compound clause
+/// "choose any number of <filter> [they control] and pay <cost> for each
+/// <noun> chosen this way" (Magnetic Mountain, Dream Tides, Thelon's Curse).
+///
+/// Emits a 2-effect head-injected chain as a single `ParsedEffectClause`:
+///   head:        `Effect::ChooseObjectsIntoTrackedSet { chooser, filter, .. }`
+///   sub_ability: `Effect::PayCost { cost: ScaledMana { base, times: TrackedSetSize } }`
+///
+/// The trailing ". If the player does, untap those creatures" sentence is a
+/// separate chunk; the chunk-loop's `strip_if_you_do_conditional` + deepest-
+/// sub_ability append wires it onto the `PayCost` node unchanged.
+fn try_parse_choose_and_pay_per_object(
+    text: &str,
+    lower: &str,
+    ctx: &mut ParseContext,
+) -> Option<ParsedEffectClause> {
+    // Selection head: [ "that player may " | "the player may " ] "choose "
+    // [ "any number of " | "a " ] — nom dispatch.
+    //
+    // The leading subject-modal prefix ("that player may") is consumed here so
+    // the detector recognizes the complete clause; `optional` is set on the
+    // produced clause to encode the "may". The cardinality quantifier is
+    // `opt`: when "any number of" is absent (already stripped upstream by
+    // `strip_any_number_quantifier`), "any number" cardinality (`min: 0,
+    // max: None`) is the correct default for this clause class.
+    let ((subject_modal, (min, max)), after_choose) = nom_on_lower(text, lower, |input| {
+        let (input, subject_modal) = opt(alt((
+            value(true, tag("that player may ")),
+            value(true, tag("the player may ")),
+        )))
+        .parse(input)?;
+        let (input, ()) = value((), tag("choose ")).parse(input)?;
+        let (input, card) = opt(alt((
+            value((0u32, None), tag("any number of ")),
+            value((1u32, Some(1u32)), tag("a ")),
+        )))
+        .parse(input)?;
+        Ok((
+            input,
+            (subject_modal.is_some(), card.unwrap_or((0u32, None))),
+        ))
+    })?;
+    let after_choose_lower = &lower[lower.len() - after_choose.len()..];
+
+    // Cost tail begins at " and pay " — split structurally with the nom
+    // `take_until` + `tag` combinator. The head is the filter phrase, the
+    // tail is "<cost> for each <noun> chosen this way".
+    let (_, (filter_text, cost_tail_lower)) =
+        nom_primitives::split_once_on(after_choose_lower, " and pay ").ok()?;
+    let filter_text_orig = &after_choose[..filter_text.len()];
+    // Map the cost tail back to original case — `parse_mana_cost` matches
+    // uppercase mana symbols (`{U}`), but `after_choose_lower` is lowercased.
+    let cost_tail = &after_choose[after_choose.len() - cost_tail_lower.len()..];
+
+    // Cost tail structure: <mana cost> " for each " <noun> " chosen this way".
+    let (after_cost, base) = nom_primitives::parse_mana_cost(cost_tail).ok()?;
+    // Verify (and discard) the " for each <noun> chosen this way" suffix —
+    // <noun> is redundant with `filter`.
+    let (suffix_rest, ()) = value((), tag::<_, _, OracleError<'_>>(" for each "))
+        .parse(after_cost)
+        .ok()?;
+    let (chosen_rest, _noun) = take_until::<_, _, OracleError<'_>>(" chosen this way")
+        .parse(suffix_rest)
+        .ok()?;
+    value((), tag::<_, _, OracleError<'_>>(" chosen this way"))
+        .parse(chosen_rest)
+        .ok()
+        .filter(|(rest, ())| rest.trim().is_empty())?;
+
+    // Parse the filter phrase ("tapped blue creatures they control"). The
+    // "they control" controller constraint is folded into the TargetFilter.
+    let (filter, filter_rem) = parse_target_with_ctx(filter_text_orig, ctx);
+    if matches!(filter, TargetFilter::None) || !filter_rem.trim().is_empty() {
+        return None;
+    }
+
+    // CR 603.7e: chooser/payer is the affected player of an "each player's
+    // upkeep" trigger — "that player". Use the trigger subject when it is a
+    // player-typed filter; otherwise the canonical anaphoric `TriggeringPlayer`.
+    let chooser = match &ctx.subject {
+        Some(TargetFilter::TriggeringPlayer) => TargetFilter::TriggeringPlayer,
+        Some(TargetFilter::Player) => TargetFilter::Player,
+        _ => TargetFilter::TriggeringPlayer,
+    };
+
+    // sub_ability: PayCost { ScaledMana { base, times: TrackedSetSize } }.
+    // CR 608.2c: A `Spell`-kind sub-ability resolves alongside its parent —
+    // the chunk-loop's deepest-sub_ability append wires the `IfYouDo`/`Untap`
+    // tail onto this node.
+    let pay_ability = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::PayCost {
+            cost: PaymentCost::ScaledMana {
+                base,
+                times: QuantityExpr::Ref {
+                    qty: QuantityRef::TrackedSetSize,
+                },
+            },
+            payer: chooser.clone(),
+        },
+    );
+
+    let mut clause = parsed_clause(Effect::ChooseObjectsIntoTrackedSet {
+        chooser,
+        filter,
+        min,
+        max,
+    });
+    clause.sub_ability = Some(Box::new(pay_ability));
+    // CR 603.4: The "that player may" modal makes the whole clause optional —
+    // declining is equivalent to choosing zero objects.
+    clause.optional = subject_modal;
+    Some(clause)
+}
+
 fn parse_for_each_object_copy_parts<'a>(
     text: &'a str,
     lower: &str,
@@ -2616,6 +2731,14 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
     }
 
     if let Some(clause) = try_parse_for_each_copy_token_source(text, &lower, ctx) {
+        return clause;
+    }
+    // CR 603.7e + CR 118.1: "choose any number of <filter> and pay <cost> for
+    // each <noun> chosen this way" — interactive selection + per-object scaled
+    // cost. Must run before the generic clause dispatch, which would otherwise
+    // parse only the trailing `pay <cost>` and silently drop the selection
+    // step and the per-object multiplier.
+    if let Some(clause) = try_parse_choose_and_pay_per_object(text, &lower, ctx) {
         return clause;
     }
 
@@ -15046,6 +15169,83 @@ mod tests {
         assert_eq!(rest, "");
         assert_eq!(counter, crate::types::counter::CounterType::Plus1Plus1);
         assert_eq!(count, QuantityExpr::Fixed { value: 2 });
+    }
+
+    // CR 603.7e + CR 118.1: "choose any number of <filter> and pay <cost> for
+    // each <noun> chosen this way" → ChooseObjectsIntoTrackedSet → PayCost
+    // { ScaledMana { base, times: TrackedSetSize } }. Magnetic Mountain class.
+    #[test]
+    fn choose_and_pay_per_object_generic_cost() {
+        let text = "that player may choose any number of tapped blue creatures \
+                    they control and pay {4} for each creature chosen this way";
+        let lower = text.to_lowercase();
+        let mut ctx = ParseContext::default();
+        let clause = try_parse_choose_and_pay_per_object(text, &lower, &mut ctx)
+            .expect("Magnetic Mountain main clause must parse");
+        // Head: ChooseObjectsIntoTrackedSet, chooser = TriggeringPlayer.
+        let Effect::ChooseObjectsIntoTrackedSet {
+            chooser, min, max, ..
+        } = &clause.effect
+        else {
+            panic!(
+                "expected ChooseObjectsIntoTrackedSet, got {:?}",
+                clause.effect
+            );
+        };
+        assert_eq!(*chooser, TargetFilter::TriggeringPlayer);
+        assert_eq!(
+            (*min, *max),
+            (0, None),
+            "\"any number of\" → min 0, max None"
+        );
+        assert!(
+            clause.optional,
+            "\"that player may\" makes the clause optional"
+        );
+        // sub_ability: PayCost { ScaledMana { base: {4}, times: TrackedSetSize } }.
+        let pay = clause.sub_ability.as_ref().expect("PayCost sub_ability");
+        let Effect::PayCost { cost, payer } = pay.effect.as_ref() else {
+            panic!("expected PayCost, got {:?}", pay.effect);
+        };
+        assert_eq!(*payer, TargetFilter::TriggeringPlayer);
+        let PaymentCost::ScaledMana { base, times } = cost else {
+            panic!("expected ScaledMana, got {cost:?}");
+        };
+        assert_eq!(*base, crate::types::mana::ManaCost::generic(4));
+        assert_eq!(
+            *times,
+            QuantityExpr::Ref {
+                qty: QuantityRef::TrackedSetSize
+            }
+        );
+    }
+
+    // CR 118.1: Colored-pip base ({U}) scales as a full ManaCost — the
+    // Thelon's Curse case the AbilityCost::ManaDynamic family cannot express.
+    #[test]
+    fn choose_and_pay_per_object_colored_pip_cost() {
+        let text = "that player may choose any number of tapped blue creatures \
+                    they control and pay {U} for each creature chosen this way";
+        let lower = text.to_lowercase();
+        let mut ctx = ParseContext::default();
+        let clause = try_parse_choose_and_pay_per_object(text, &lower, &mut ctx)
+            .expect("Thelon's Curse main clause must parse");
+        let pay = clause.sub_ability.as_ref().expect("PayCost sub_ability");
+        let Effect::PayCost {
+            cost: PaymentCost::ScaledMana { base, .. },
+            ..
+        } = pay.effect.as_ref()
+        else {
+            panic!("expected PayCost {{ ScaledMana }}, got {:?}", pay.effect);
+        };
+        assert_eq!(
+            *base,
+            crate::types::mana::ManaCost::Cost {
+                shards: vec![crate::types::mana::ManaCostShard::Blue],
+                generic: 0,
+            },
+            "colored pip {{U}} preserved as the scaled base"
+        );
     }
 
     #[test]

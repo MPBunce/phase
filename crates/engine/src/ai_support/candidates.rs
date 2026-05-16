@@ -1651,6 +1651,40 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
             }
             actions
         }
+        // CR 608.2c: ChooseObjectsIntoTrackedSet — choose any subset of the
+        // eligible battlefield permanents (or decline with an empty selection).
+        WaitingFor::ChooseObjectsSelection {
+            player, eligible, ..
+        } => {
+            let mut actions = vec![
+                // Pay for all affordable: select every eligible permanent.
+                candidate(
+                    GameAction::SelectTargets {
+                        targets: eligible.clone(),
+                    },
+                    TacticalClass::Selection,
+                    Some(*player),
+                ),
+                // Decline: empty selection.
+                candidate(
+                    GameAction::SelectTargets {
+                        targets: Vec::new(),
+                    },
+                    TacticalClass::Selection,
+                    Some(*player),
+                ),
+            ];
+            for target in eligible {
+                actions.push(candidate(
+                    GameAction::SelectTargets {
+                        targets: vec![target.clone()],
+                    },
+                    TacticalClass::Selection,
+                    Some(*player),
+                ));
+            }
+            actions
+        }
         // CR 701.36a: Populate — choose a creature token to copy.
         WaitingFor::PopulateChoice {
             player,

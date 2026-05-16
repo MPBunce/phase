@@ -1285,6 +1285,7 @@ impl GameRunner {
             WaitingFor::ChooseLegend { .. } => "ChooseLegend",
             WaitingFor::BattleProtectorChoice { .. } => "BattleProtectorChoice",
             WaitingFor::ProliferateChoice { .. } => "ProliferateChoice",
+            WaitingFor::ChooseObjectsSelection { .. } => "ChooseObjectsSelection",
             WaitingFor::CopyRetarget { .. } => "CopyRetarget",
             WaitingFor::AssignCombatDamage { .. } => "AssignCombatDamage",
             WaitingFor::DistributeAmong { .. } => "DistributeAmong",

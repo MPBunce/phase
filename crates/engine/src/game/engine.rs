@@ -3143,6 +3143,58 @@ fn apply_action(
             effects::drain_pending_continuation(state, &mut events);
             state.waiting_for.clone()
         }
+        // CR 608.2c: ChooseObjectsIntoTrackedSet — player submitted their
+        // battlefield-permanent selection. Publish a fresh tracked set so the
+        // downstream `PayCost { ScaledMana }` and the `IfYouDo`/`Untap` tail
+        // resolve against exactly this selection, then resume the chain.
+        (
+            WaitingFor::ChooseObjectsSelection {
+                player,
+                eligible,
+                trigger_event,
+            },
+            GameAction::SelectTargets { targets },
+        ) => {
+            let p = *player;
+            let eligible_set = eligible.clone();
+            let pending_event = trigger_event.clone();
+            // Validate all selected targets are in the eligible set.
+            for t in &targets {
+                if !eligible_set.contains(t) {
+                    return Err(EngineError::InvalidAction(
+                        "Selected target not eligible for object selection".to_string(),
+                    ));
+                }
+            }
+            // Map TargetRef → ObjectId. The eligible set is all battlefield
+            // permanents, so every selected target is an Object.
+            let ids: Vec<ObjectId> = targets
+                .iter()
+                .filter_map(|t| match t {
+                    TargetRef::Object(id) => Some(*id),
+                    TargetRef::Player(_) => None,
+                })
+                .collect();
+            // CR 603.7: Always allocate a fresh tracked set — a player-chosen
+            // "those creatures" set is a new resolution scope. An empty
+            // selection yields an empty fresh set (size 0).
+            effects::publish_fresh_tracked_set(state, ids);
+            events.push(GameEvent::EffectResolved {
+                kind: crate::types::ability::EffectKind::ChooseObjectsIntoTrackedSet,
+                source_id: ObjectId(0), // Source not tracked through choice state
+            });
+            state.waiting_for = WaitingFor::Priority { player: p };
+            state.priority_player = p;
+            // CR 608.2: restore the triggering event so the stashed
+            // `PayCost { ScaledMana, payer: TriggeringPlayer }` continuation
+            // resolves the payer correctly — the trigger's resolution is still
+            // in flight.
+            let previous_trigger_event = state.current_trigger_event.clone();
+            state.current_trigger_event = pending_event;
+            effects::drain_pending_continuation(state, &mut events);
+            state.current_trigger_event = previous_trigger_event;
+            state.waiting_for.clone()
+        }
         // CR 707.10c: Copy retarget — player chose target for the current slot
         // via battlefield click. Advances slot-by-slot; finalizes on the last slot.
         (

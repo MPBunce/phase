@@ -3662,6 +3662,17 @@ pub enum PaymentCost {
     AbilityCost {
         cost: AbilityCost,
     },
+    /// CR 118.1: Per-object scaled mana cost. The `base` `ManaCost` (which may
+    /// carry colored pips, e.g. `{U}`) is multiplied by `times` at payment
+    /// resolution — every pip is repeated and the generic component scaled.
+    /// Models "pay {N} for each [object] chosen this way" uniformly across
+    /// generic ({4}×N) and colored ({U}×N) bases.
+    /// CR 118.5: when `times` resolves to 0 the scaled cost is `{0}`, paid by
+    /// the player's acknowledgment (the empty selection) — a no-op SUCCESS.
+    ScaledMana {
+        base: ManaCost,
+        times: QuantityExpr,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -5393,6 +5404,24 @@ pub enum Effect {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         constraint: Option<ChooseFromZoneConstraint>,
     },
+    /// CR 603.7e: An affected-player-chosen battlefield permanent set, written
+    /// into the chain's tracked object set so downstream effects ("pay {N} for
+    /// each ... chosen this way", "untap those creatures") reference the exact
+    /// selection. `chooser` is a `TargetFilter` (not `Chooser`) so it rebinds
+    /// per-trigger-instance to the affected player — e.g. the player whose
+    /// upkeep it is for an "at the beginning of each player's upkeep" trigger.
+    /// `filter` constrains the eligible permanents; `min`/`max` express the
+    /// cardinality ("any number" → `min: 0, max: None`).
+    ChooseObjectsIntoTrackedSet {
+        /// The player who makes the selection — resolved per-instance.
+        chooser: TargetFilter,
+        /// Constrains which battlefield permanents are eligible.
+        filter: TargetFilter,
+        /// Minimum number of objects that must be selected.
+        min: u32,
+        /// Maximum number of objects selectable (`None` = "any number").
+        max: Option<u32>,
+    },
     /// CR 101.4 + CR 701.21a: Each player chooses one permanent per type category
     /// from among the permanents they control, then sacrifices the rest.
     /// Building block for Cataclysm, Tragic Arrogance, Cataclysmic Gearhulk.
@@ -6491,6 +6520,10 @@ impl Effect {
             | Effect::Conjure { .. }
             | Effect::ChooseOneOf { .. }
             | Effect::Unimplemented { .. }
+            // CR 603.7e: ChooseObjectsIntoTrackedSet has no discrete effect-target
+            // slot — `chooser` is a player ref resolved like `PayCost.payer`, and
+            // `filter` constrains the interactive selection, not a targeting slot.
+            | Effect::ChooseObjectsIntoTrackedSet { .. }
             // CR 701.20a: RevealFromHand implicitly targets the controller's own hand;
             // it has no discrete `target` field for the generic targeting layer.
             | Effect::RevealFromHand { .. } => None,
@@ -6614,6 +6647,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::ProcessRadCounters => "ProcessRadCounters",
         Effect::GrantCastingPermission { .. } => "GrantCastingPermission",
         Effect::ChooseFromZone { .. } => "ChooseFromZone",
+        Effect::ChooseObjectsIntoTrackedSet { .. } => "ChooseObjectsIntoTrackedSet",
         Effect::ChooseAndSacrificeRest { .. } => "ChooseAndSacrificeRest",
         Effect::Exploit { .. } => "Exploit",
         Effect::GainEnergy { .. } => "GainEnergy",
@@ -6782,6 +6816,7 @@ pub enum EffectKind {
     ProcessRadCounters,
     GrantCastingPermission,
     ChooseFromZone,
+    ChooseObjectsIntoTrackedSet,
     ChooseAndSacrificeRest,
     Exploit,
     GainEnergy,
@@ -6954,6 +6989,7 @@ impl From<&Effect> for EffectKind {
             Effect::ProcessRadCounters => EffectKind::ProcessRadCounters,
             Effect::GrantCastingPermission { .. } => EffectKind::GrantCastingPermission,
             Effect::ChooseFromZone { .. } => EffectKind::ChooseFromZone,
+            Effect::ChooseObjectsIntoTrackedSet { .. } => EffectKind::ChooseObjectsIntoTrackedSet,
             Effect::ChooseAndSacrificeRest { .. } => EffectKind::ChooseAndSacrificeRest,
             Effect::Exploit { .. } => EffectKind::Exploit,
             Effect::GainEnergy { .. } => EffectKind::GainEnergy,

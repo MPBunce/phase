@@ -576,6 +576,11 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
             targets: Vec::new(),
         }),
 
+        // ChooseObjectsIntoTrackedSet: default to declining (empty selection).
+        WaitingFor::ChooseObjectsSelection { .. } => Some(GameAction::SelectTargets {
+            targets: Vec::new(),
+        }),
+
         // Copy retarget: keep current targets.
         WaitingFor::CopyRetarget { target_slots, .. } => {
             let targets: Vec<_> = target_slots.iter().map(|s| s.current.clone()).collect();

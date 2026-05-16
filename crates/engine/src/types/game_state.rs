@@ -2119,6 +2119,21 @@ pub enum WaitingFor {
         /// Eligible permanents (with counters) and players (with poison/energy).
         eligible: Vec<TargetRef>,
     },
+    /// CR 603.7e: The affected player of a `ChooseObjectsIntoTrackedSet` effect
+    /// selects any number of battlefield permanents from `eligible`. The
+    /// chosen objects are written into a fresh tracked set so a downstream
+    /// `PayCost { ScaledMana }` and `IfYouDo`/`Untap` reference the exact
+    /// selection. An empty selection is legal — the player declines.
+    ChooseObjectsSelection {
+        player: PlayerId,
+        /// Eligible battlefield permanents matching the effect's filter.
+        eligible: Vec<TargetRef>,
+        /// CR 608.2: triggering event of the ability whose `ChooseObjectsIntoTrackedSet`
+        /// raised this prompt. Restored around the continuation drain so the stashed
+        /// `PayCost { payer: TriggeringPlayer }` resolves to the correct player.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        trigger_event: Option<crate::types::events::GameEvent>,
+    },
     /// CR 101.4 + CR 701.21a: Player selects one permanent per type category
     /// from among those they (or another player) control, then the rest are sacrificed.
     /// Used by Cataclysm, Tragic Arrogance, Cataclysmic Gearhulk.
@@ -2407,6 +2422,7 @@ impl WaitingFor {
             | WaitingFor::ChooseLegend { player, .. }
             | WaitingFor::BattleProtectorChoice { player, .. }
             | WaitingFor::ProliferateChoice { player, .. }
+            | WaitingFor::ChooseObjectsSelection { player, .. }
             | WaitingFor::CategoryChoice { player, .. }
             | WaitingFor::CopyRetarget { player, .. }
             | WaitingFor::AssignCombatDamage { player, .. }
@@ -3392,6 +3408,18 @@ pub struct GameState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_optional_effect: Option<Box<crate::types::ability::ResolvedAbility>>,
 
+    /// Transient: the triggering event of the ability stashed in
+    /// `pending_optional_effect`, captured while it is still live (before
+    /// `resolve_top` clears `current_trigger_event`). Restored around
+    /// `resolve_optional_effect_decision` so an optional ("may") triggered
+    /// ability's effect resolves `TriggeringPlayer` / event-context refs
+    /// exactly as a non-optional trigger would. Mirrors
+    /// `WaitingFor::UnlessPayment.trigger_event`. Set ONLY for the
+    /// `OptionalEffectChoice` stash; taken by `handle_optional_effect_choice`.
+    /// CR 608.2: an ability's resolution is a single process.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_optional_trigger_event: Option<crate::types::events::GameEvent>,
+
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub may_trigger_auto_choices: Vec<MayTriggerAutoChoiceRecord>,
 
@@ -3889,6 +3917,7 @@ impl GameState {
             pending_repeat_iteration: None,
             pending_choose_one_of: None,
             pending_optional_effect: None,
+            pending_optional_trigger_event: None,
             may_trigger_auto_choices: Vec::new(),
             pending_begin_game_abilities: Vec::new(),
             resolving_begin_game_abilities: false,

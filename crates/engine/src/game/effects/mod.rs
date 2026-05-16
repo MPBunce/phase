@@ -37,6 +37,7 @@ pub mod choose_and_sacrifice_rest;
 pub mod choose_card;
 pub mod choose_damage_source;
 pub mod choose_from_zone;
+pub mod choose_objects_into_tracked_set;
 pub mod choose_one_of;
 pub mod clash;
 pub mod cleanup;
@@ -532,6 +533,7 @@ fn waits_for_resolution_choice(waiting_for: &WaitingFor) -> bool {
             | WaitingFor::CascadeChoice { .. }
             | WaitingFor::TopOrBottomChoice { .. }
             | WaitingFor::ProliferateChoice { .. }
+            | WaitingFor::ChooseObjectsSelection { .. }
             | WaitingFor::ExploreChoice { .. }
             | WaitingFor::CopyRetarget { .. }
             | WaitingFor::DistributeAmong { .. }
@@ -929,6 +931,9 @@ pub fn resolve_effect(
         Effect::RingTemptsYou => ring::resolve(state, ability, events),
         Effect::GrantCastingPermission { .. } => grant_permission::resolve(state, ability, events),
         Effect::ChooseFromZone { .. } => choose_from_zone::resolve(state, ability, events),
+        Effect::ChooseObjectsIntoTrackedSet { .. } => {
+            choose_objects_into_tracked_set::resolve(state, ability, events)
+        }
         Effect::ChooseAndSacrificeRest { .. } => {
             choose_and_sacrifice_rest::resolve(state, ability, events)
         }
@@ -1249,6 +1254,27 @@ fn publish_tracked_set(state: &mut GameState, affected_ids: Vec<ObjectId>) {
         state.tracked_object_sets.insert(set_id, affected_ids);
         state.chain_tracked_set_id = Some(set_id);
     }
+}
+
+/// CR 603.7: A player-chosen "those creatures" set is a fresh resolution
+/// scope — never extend an ancestor chain set.
+///
+/// Unlike [`publish_tracked_set`] (which extends `chain_tracked_set_id` when an
+/// ancestor in the resolution chain already published), this *always*
+/// allocates a strictly-greater `TrackedSetId` and rebinds
+/// `chain_tracked_set_id` so the same-chain `PayCost { ScaledMana }` and the
+/// `IfYouDo`/`Untap{TrackedSet}` tail both unify on the freshly-chosen set.
+/// Used by `Effect::ChooseObjectsIntoTrackedSet` — an interactive selection is
+/// the semantic START of a new scope, not a continuation of a prior one.
+pub(crate) fn publish_fresh_tracked_set(
+    state: &mut GameState,
+    affected_ids: Vec<ObjectId>,
+) -> TrackedSetId {
+    let set_id = TrackedSetId(state.next_tracked_set_id);
+    state.next_tracked_set_id += 1;
+    state.tracked_object_sets.insert(set_id, affected_ids);
+    state.chain_tracked_set_id = Some(set_id);
+    set_id
 }
 
 /// CR 603.7 + CR 109.5: Returns `true` when the effect resolves an acting
@@ -2157,6 +2183,12 @@ pub fn resolve_ability_chain(
         }
         state.pending_optional_effect =
             Some(Box::new(ability_with_event_context_targets(state, ability)));
+        // CR 608.2: capture the triggering event in lockstep with the stashed
+        // ability while `current_trigger_event` is still live (we are inside
+        // `execute_effect`). Restored when the optional decision resumes so an
+        // optional ("may") trigger's effect resolves `TriggeringPlayer` and
+        // other event-context refs exactly as a non-optional trigger would.
+        state.pending_optional_trigger_event = state.current_trigger_event.clone();
         state.waiting_for = WaitingFor::OptionalEffectChoice {
             player: prompt_player,
             source_id: ability.source_id,
@@ -8793,6 +8825,56 @@ mod tests {
             "Stale cost_payment_failed_flag should be cleared by handle_optional_effect_choice. \
              Hand should have 2 cards (discard 1 + draw 2), got {}.",
             hand_after,
+        );
+    }
+
+    // CR 603.7: publish_fresh_tracked_set always allocates a strictly-greater
+    // id and rebinds chain_tracked_set_id — never extends an ancestor set.
+    #[test]
+    fn publish_fresh_tracked_set_never_extends_ancestor() {
+        let mut state = GameState::new_two_player(42);
+        // Simulate an ancestor publish that set the chain set.
+        let ancestor = TrackedSetId(state.next_tracked_set_id);
+        state.next_tracked_set_id += 1;
+        state
+            .tracked_object_sets
+            .insert(ancestor, vec![ObjectId(7)]);
+        state.chain_tracked_set_id = Some(ancestor);
+
+        // A fresh publish must NOT extend the ancestor — it allocates anew.
+        let fresh = publish_fresh_tracked_set(&mut state, vec![ObjectId(1), ObjectId(2)]);
+        assert!(
+            fresh.0 > ancestor.0,
+            "fresh id {} must be strictly greater than ancestor {}",
+            fresh.0,
+            ancestor.0
+        );
+        assert_eq!(
+            state.chain_tracked_set_id,
+            Some(fresh),
+            "chain_tracked_set_id must rebind to the fresh set"
+        );
+        assert_eq!(
+            state.tracked_object_sets.get(&ancestor),
+            Some(&vec![ObjectId(7)]),
+            "ancestor set must be untouched"
+        );
+        assert_eq!(
+            state.tracked_object_sets.get(&fresh),
+            Some(&vec![ObjectId(1), ObjectId(2)]),
+            "fresh set must hold exactly the published ids"
+        );
+    }
+
+    // CR 118.5: An empty selection yields an empty fresh tracked set (size 0).
+    #[test]
+    fn publish_fresh_tracked_set_empty_selection() {
+        let mut state = GameState::new_two_player(42);
+        let fresh = publish_fresh_tracked_set(&mut state, vec![]);
+        assert_eq!(
+            state.tracked_object_sets.get(&fresh),
+            Some(&vec![]),
+            "empty selection produces an empty fresh set"
         );
     }
 }

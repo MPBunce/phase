@@ -1823,6 +1823,20 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             d.push(("count".into(), count.to_string()));
             d.push(("zone".into(), fmt_zone(zone)));
         }
+        Effect::ChooseObjectsIntoTrackedSet {
+            chooser,
+            filter,
+            min,
+            max,
+        } => {
+            d.push(("chooser".into(), fmt_target(chooser)));
+            d.push(("filter".into(), fmt_target(filter)));
+            d.push(("min".into(), min.to_string()));
+            d.push((
+                "max".into(),
+                max.map_or_else(|| "any".to_string(), |m| m.to_string()),
+            ));
+        }
         Effect::GainEnergy { amount } => {
             d.push(("amount".into(), fmt_quantity(amount)));
         }

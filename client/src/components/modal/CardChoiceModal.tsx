@@ -286,6 +286,11 @@ export function CardChoiceModal() {
     case "ProliferateChoice":
       if (!canActForWaitingState) return null;
       return <ProliferateModal data={waitingFor.data} />;
+    case "ChooseObjectsSelection":
+      if (!canActForWaitingState) return null;
+      return (
+        <ProliferateModal data={waitingFor.data} variant="chooseObjects" />
+      );
     case "CategoryChoice":
       if (!canActForWaitingState) return null;
       return <CategoryChoiceModal data={waitingFor.data} />;
