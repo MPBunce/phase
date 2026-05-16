@@ -8212,9 +8212,21 @@ fn parse_graveyard_permission_filter(input: &str) -> (TargetFilter, bool) {
     (filter, false)
 }
 
+/// CR 601.3 + CR 113.6b: Parse the trailing condition gate on a graveyard
+/// cast-permission ability ("You may cast this card from your graveyard
+/// [as long as|if] [condition]"). The permission is a zone-restricted ability
+/// (CR 113.6b) that allows a cast under CR 601.3; the condition restricts when
+/// the permission applies. Both the durative "as long as" form and the
+/// turn-history "if" form (Oathsworn Vampire — "if you gained life this turn")
+/// are evaluated when the permission is queried, so they share the same
+/// `StaticCondition` carrier. The condition body is delegated to
+/// `parse_inner_condition` — the single authority for game-state conditions.
 fn parse_graveyard_permission_condition(input: &str) -> OracleResult<'_, StaticCondition> {
-    let (rest, condition) =
-        preceded(tag(" as long as "), nom_condition::parse_inner_condition).parse(input)?;
+    let (rest, condition) = preceded(
+        alt((tag(" as long as "), tag(" if "))),
+        nom_condition::parse_inner_condition,
+    )
+    .parse(input)?;
     let (rest, _) = opt(tag(".")).parse(rest)?;
     Ok((rest, condition))
 }
@@ -12526,6 +12538,41 @@ mod tests {
                 );
             }
             other => panic!("expected Zombie presence condition, got {other:?}"),
+        }
+    }
+
+    /// CR 601.3 + CR 113.6b: Oathsworn Vampire — "You may cast this card from
+    /// your graveyard if you gained life this turn." The trailing turn-history
+    /// "if" gate must attach as the permission's `condition`; without it the
+    /// permission would be unconditional. Regression for the swallowed
+    /// `Condition_If` clause.
+    #[test]
+    fn graveyard_cast_permission_oathsworn_vampire_if_gate() {
+        use crate::types::ability::{Comparator, QuantityExpr, QuantityRef};
+        let text = "You may cast this card from your graveyard if you gained life this turn.";
+        let def = parse_static_line(text).expect("should parse Oathsworn Vampire text");
+        assert!(matches!(
+            def.mode,
+            StaticMode::GraveyardCastPermission {
+                frequency: CastFrequency::Unlimited,
+                play_mode: CardPlayMode::Cast,
+                ..
+            }
+        ));
+        assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+        assert_eq!(def.active_zones, vec![Zone::Graveyard]);
+        match def.condition {
+            Some(StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::LifeGainedThisTurn { player },
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 1 },
+            }) => {
+                assert_eq!(player, PlayerScope::Controller);
+            }
+            other => panic!("expected LifeGainedThisTurn >= 1 condition, got {other:?}"),
         }
     }
 
