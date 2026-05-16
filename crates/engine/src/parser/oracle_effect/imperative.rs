@@ -3803,6 +3803,31 @@ pub(super) fn parse_counter_ast(text: &str, lower: &str) -> Option<ZoneCounterIm
         });
     }
 
+    // CR 701.6a + CR 115.1: "Counter target <stack-object phrase>" where the
+    // phrase is a multi-way disjunction of spells and/or activated/triggered
+    // abilities — e.g. Louisoix's Sacrifice's "activated ability, triggered
+    // ability, or noncreature spell". Bare `parse_target` cannot recognize the
+    // "activated ability" disjunct (it is not a card type) and silently drops
+    // the noncreature restriction, yielding a degenerate empty-`type_filters`
+    // stack filter. Strip the leading "target " token (nom `tag`, not string
+    // matching) and try the dedicated stack-object combinator first; it
+    // composes the ability-kind axis with an optional restricted-spell tail.
+    let stack_phrase = opt(tag::<_, _, OracleError<'_>>("target "))
+        .parse(rest)
+        .map(|(after, _)| after)
+        .unwrap_or(rest);
+    if let Ok((_, stack_target)) =
+        crate::parser::oracle_nom::target::parse_stack_object_target(stack_phrase)
+    {
+        let unless_pay = super::parse_unless_payment(rest).map(super::counter_unless_pay_modifier);
+        return Some(ZoneCounterImperativeAst::Counter {
+            target: stack_target,
+            source_static: None,
+            unless_pay,
+            all: mass_consumed,
+        });
+    }
+
     let (target, _rem) = parse_target(rest_orig);
     #[cfg(debug_assertions)]
     assert_no_compound_remainder(_rem, text);
@@ -5851,6 +5876,68 @@ mod tests {
 
     fn has_prop(tf: &TypedFilter, prop: FilterProp) -> bool {
         tf.properties.iter().any(|candidate| candidate == &prop)
+    }
+
+    /// Issue #408 — "Counter target activated ability, triggered ability, or
+    /// noncreature spell" (Louisoix's Sacrifice) must parse to the full
+    /// three-way disjunction, not a degenerate empty-`type_filters` stack
+    /// filter. The noncreature restriction must survive on the spell leg.
+    #[test]
+    fn parse_counter_louisoix_three_way_disjunction() {
+        let text = "Counter target activated ability, triggered ability, or noncreature spell.";
+        let ast = parse_counter_ast(text, &text.to_lowercase())
+            .expect("Louisoix's Sacrifice counter clause should parse");
+        let ZoneCounterImperativeAst::Counter { target, .. } = ast else {
+            panic!("expected a Counter AST");
+        };
+        let TargetFilter::Or { filters } = &target else {
+            panic!("expected Or {{ ability, noncreature-spell }}, got {target:?}");
+        };
+        assert!(
+            filters
+                .iter()
+                .any(|f| matches!(f, TargetFilter::StackAbility { controller: None })),
+            "missing the activated/triggered ability disjunct: {target:?}"
+        );
+        let spell_leg = filters
+            .iter()
+            .find_map(typed_leg)
+            .expect("missing the typed noncreature-spell disjunct");
+        assert!(
+            has_type(spell_leg, TypeFilter::Non(Box::new(TypeFilter::Creature))),
+            "the spell leg must EXCLUDE creature spells (noncreature restriction)"
+        );
+        assert!(
+            has_prop(spell_leg, FilterProp::InZone { zone: Zone::Stack }),
+            "the spell leg must be pinned to the stack zone"
+        );
+    }
+
+    /// Issue #408 regression guard — a plain "Counter target spell"
+    /// (Counterspell) must still yield a stack-spell filter; the new
+    /// stack-object combinator must not steal the simple case.
+    #[test]
+    fn parse_counter_plain_spell_unchanged() {
+        let text = "Counter target spell.";
+        let ast = parse_counter_ast(text, &text.to_lowercase())
+            .expect("\"Counter target spell\" should parse");
+        let ZoneCounterImperativeAst::Counter { target, .. } = ast else {
+            panic!("expected a Counter AST");
+        };
+        // "Counter target spell" → a stack-pinned spell filter (StackSpell or
+        // a stack-constrained Typed Card filter). It must NOT be an Or with an
+        // ability disjunct.
+        assert!(
+            !matches!(&target, TargetFilter::Or { .. }),
+            "plain \"Counter target spell\" must not gain an ability disjunct: {target:?}"
+        );
+        let is_spell_filter = is_stack_spell_leg(&target)
+            || typed_leg(&target)
+                .is_some_and(|tf| has_prop(tf, FilterProp::InZone { zone: Zone::Stack }));
+        assert!(
+            is_spell_filter,
+            "plain \"Counter target spell\" must yield a stack-spell filter, got {target:?}"
+        );
     }
 
     #[test]
