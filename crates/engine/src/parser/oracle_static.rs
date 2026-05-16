@@ -1507,7 +1507,11 @@ fn parse_static_line_inner(text: &str, inverted: InvertedAsLongAs) -> Option<Sta
         let mut def = StaticDefinition::new(StaticMode::CantBlock)
             .affected(TargetFilter::SelfRef)
             .description(text.to_string());
-        if let Some(condition) = parse_unless_static_condition(&tp) {
+        // CR 509.1c: a trailing "unless [cost]" or "if [board-state]" clause
+        // scopes the restriction; attach whichever is present.
+        if let Some(condition) =
+            parse_unless_static_condition(&tp).or_else(|| parse_if_static_condition(&tp))
+        {
             def.condition = Some(condition);
         }
         return Some(def);
@@ -1523,7 +1527,11 @@ fn parse_static_line_inner(text: &str, inverted: InvertedAsLongAs) -> Option<Sta
         let mut def = StaticDefinition::new(mode)
             .affected(TargetFilter::SelfRef)
             .description(text.to_string());
-        if let Some(condition) = parse_unless_static_condition(&tp) {
+        // CR 508.1: a trailing "unless [cost]" or "if [board-state]" clause
+        // scopes the restriction; attach whichever is present.
+        if let Some(condition) =
+            parse_unless_static_condition(&tp).or_else(|| parse_if_static_condition(&tp))
+        {
             def.condition = Some(condition);
         }
         return Some(def);
@@ -3881,6 +3889,16 @@ fn rebind_source_object_quantity_ref_to_recipient(qty: QuantityRef) -> QuantityR
 fn parse_unless_static_condition(tp: &TextPair<'_>) -> Option<StaticCondition> {
     let (_, unless_text) = tp.split_around(" unless ")?;
     parse_static_condition(unless_text.original)
+}
+
+/// CR 508.1 / CR 509.1c: Parse the trailing " if [condition]" clause of a
+/// combat-restriction static ("~ can't attack if defending player controls an
+/// untapped land"). Mirrors `parse_unless_static_condition`; delegates the
+/// condition body to `parse_static_condition` → `parse_inner_condition` (the
+/// single authority for game-state conditions).
+fn parse_if_static_condition(tp: &TextPair<'_>) -> Option<StaticCondition> {
+    let (_, if_text) = tp.split_around(" if ")?;
+    parse_static_condition(if_text.original)
 }
 
 /// CR 508.1d + CR 508.1h + CR 509.1c + CR 118.12a: Parse the combat-tax static family:
@@ -9696,6 +9714,41 @@ mod tests {
         assert_eq!(def.mode, StaticMode::CantBlock);
         assert!(def.modifications.is_empty());
         assert!(def.description.is_some());
+        // Regression: a plain restriction with no "if"/"unless" stays unconditional.
+        assert_eq!(def.condition, None);
+    }
+
+    /// CR 508.1: "~ can't attack if defending player controls [filter]" attaches
+    /// the trailing "if" clause as a `DefendingPlayerControls` condition (Orgg,
+    /// Mogg Jailer). Before 5a the condition was dropped.
+    #[test]
+    fn static_cant_attack_if_defending_player_controls() {
+        let def = parse_static_line(
+            "~ can't attack if defending player controls an untapped creature with power 3 or greater.",
+        )
+        .expect("combat restriction should parse");
+        assert_eq!(def.mode, StaticMode::CantAttack);
+        assert!(
+            matches!(
+                def.condition,
+                Some(StaticCondition::DefendingPlayerControls { .. })
+            ),
+            "expected DefendingPlayerControls condition, got {:?}",
+            def.condition
+        );
+    }
+
+    /// CR 509.1c: "~ can't block if you control [filter]" attaches the "if"
+    /// clause as a controller-scoped board-presence condition (Branded Brawlers).
+    #[test]
+    fn static_cant_block_if_you_control() {
+        let def = parse_static_line("~ can't block if you control an untapped land.")
+            .expect("combat restriction should parse");
+        assert_eq!(def.mode, StaticMode::CantBlock);
+        assert!(
+            def.condition.is_some(),
+            "the trailing \"if you control ...\" clause must attach a condition"
+        );
     }
 
     #[test]
