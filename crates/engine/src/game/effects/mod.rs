@@ -4537,6 +4537,156 @@ mod tests {
         assert_eq!(state.players[0].life, 12);
     }
 
+    /// CR 608.2c + CR 400.7j + CR 608.2k: a non-targeted `ChangeZone` with 2+
+    /// eligible objects raises `WaitingFor::EffectZoneChoice`. After the player
+    /// picks a card, the `EffectZoneChoice` handler stamps parent-referent
+    /// context onto the pending continuation so a later instruction (here a
+    /// `LoseLife` rider reading `QuantityRef::EventContextSourceManaValue`) sees
+    /// the *chosen* object's mana value — not the first eligible card, and not
+    /// a fallback of 0. This covers the `EffectZoneChoice` continuation stamp
+    /// site, the sibling path to `change_zone_then_lose_life_reads_moved_object_mana_value`.
+    ///
+    /// `chosen_mv` is the mana value of the card the player selects; the test
+    /// asserts the controller loses exactly that much life (starting from the
+    /// `GameState::new_two_player` default of 20). A regression in the stamp
+    /// would leave the `LoseLife` quantity unresolved (fallback 0) and life at 20.
+    fn run_effect_zone_choice_lose_life_case(choose_mv8: bool) {
+        let mut state = GameState::new_two_player(42);
+        let mv8_creature = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Eight Mana Creature".to_string(),
+            Zone::Graveyard,
+        );
+        let mv3_creature = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Three Mana Creature".to_string(),
+            Zone::Graveyard,
+        );
+        for (id, mv) in [(mv8_creature, 8), (mv3_creature, 3)] {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_card_types = obj.card_types.clone();
+            obj.mana_cost = ManaCost::generic(mv);
+            obj.base_mana_cost = obj.mana_cost.clone();
+        }
+
+        let lose_life = ResolvedAbility::new(
+            Effect::LoseLife {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextSourceManaValue,
+                },
+                target: Some(TargetFilter::Controller),
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        // Empty `targets` + `optional_targeting: false` (the `new` default)
+        // forces `resolve()` down the non-targeted resolution-time zone-scan
+        // path; two eligible graveyard creatures raise `EffectZoneChoice`.
+        let reanimate = ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Battlefield,
+                target: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Creature],
+                    controller: None,
+                    properties: vec![FilterProp::InZone {
+                        zone: Zone::Graveyard,
+                    }],
+                }),
+                owner_library: false,
+                enter_transformed: false,
+                under_your_control: true,
+                enter_tapped: false,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        )
+        .sub_ability(lose_life);
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &reanimate, &mut events, 0).unwrap();
+
+        let choice_player = match &state.waiting_for {
+            WaitingFor::EffectZoneChoice {
+                player,
+                effect_kind: EffectKind::ChangeZone,
+                zone: Zone::Graveyard,
+                cards,
+                ..
+            } => {
+                assert!(cards.contains(&mv8_creature));
+                assert!(cards.contains(&mv3_creature));
+                *player
+            }
+            other => panic!("expected EffectZoneChoice, got {other:?}"),
+        };
+        assert!(
+            state.pending_continuation.is_some(),
+            "LoseLife tail must be stashed as a pending continuation"
+        );
+
+        let chosen = if choose_mv8 {
+            mv8_creature
+        } else {
+            mv3_creature
+        };
+        let unchosen = if choose_mv8 {
+            mv3_creature
+        } else {
+            mv8_creature
+        };
+
+        crate::game::engine::apply(
+            &mut state,
+            choice_player,
+            GameAction::SelectCards {
+                cards: vec![chosen],
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            state.objects[&chosen].zone,
+            Zone::Battlefield,
+            "chosen card should have moved to the battlefield"
+        );
+        assert_eq!(
+            state.objects[&unchosen].zone,
+            Zone::Graveyard,
+            "unchosen card should be untouched"
+        );
+        // Discriminating assertion: the continuation read the chosen card's MV.
+        // A stamp regression would leave the quantity unresolved (0) and life at 20.
+        let expected_life = if choose_mv8 { 20 - 8 } else { 20 - 3 };
+        assert_eq!(
+            state.players[0].life, expected_life,
+            "controller should lose life equal to the chosen object's mana value"
+        );
+        assert!(
+            state.pending_continuation.is_none(),
+            "continuation should be drained after the choice resolves"
+        );
+    }
+
+    #[test]
+    fn effect_zone_choice_then_lose_life_reads_chosen_object_mana_value() {
+        // Choosing the MV-8 creature -> lose 8 life (20 -> 12).
+        run_effect_zone_choice_lose_life_case(true);
+        // Choosing the MV-3 creature -> lose 3 life (20 -> 17): proves the
+        // stamp tracks the actual choice, not the first eligible card.
+        run_effect_zone_choice_lose_life_case(false);
+    }
+
     fn bounce_then_draw_if_controller_matched_lki(
         permanent_controller: PlayerId,
     ) -> (GameState, Vec<GameEvent>) {
