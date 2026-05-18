@@ -1,3 +1,8 @@
+---
+name: bug-triage
+description: "Use when triaging Phase Discord bug reports, syncing reports into triage artifacts, creating or updating GitHub issues, tracking bug clusters, or applying the repository's bug-fix review workflow."
+---
+
 # Bug Triage System — Operator Reference
 
 ## Quick Commands
