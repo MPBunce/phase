@@ -1038,9 +1038,7 @@ fn lander_ability() -> AbilityDefinition {
     .sub_ability(
         AbilityDefinition::new(
             AbilityKind::Activated,
-            // CR 614.1: the found land enters the battlefield tapped.
-            // (The precise subpart is 614.1c; the existing `enter_tapped`
-            //  field is annotated `CR 614.1` — kept consistent here.)
+            // CR 614.1c: "enters tapped" is an as-enters replacement effect.
             Effect::ChangeZone {
                 origin: Some(Zone::Library),
                 destination: Zone::Battlefield,
