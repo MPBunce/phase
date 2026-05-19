@@ -271,7 +271,7 @@ export type CoreType =
   | "Dungeon";
 
 export type ManaType = "White" | "Blue" | "Black" | "Red" | "Green" | "Colorless";
-export type ConvokeMode = "Convoke" | "Waterbend";
+export type ConvokeMode = "Convoke" | "Waterbend" | "Improvise";
 export type RoomDoor = "Left" | "Right";
 
 /**

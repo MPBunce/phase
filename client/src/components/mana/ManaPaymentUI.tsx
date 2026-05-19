@@ -235,7 +235,9 @@ export function ManaPaymentUI() {
                 <p className="mb-3 text-center text-xs font-medium text-cyan-300">
                   {convokeMode === "Convoke"
                     ? "Tap creatures to help pay."
-                    : "Tap creatures or artifacts to help pay."}
+                    : convokeMode === "Improvise"
+                      ? "Tap artifacts to help pay."
+                      : "Tap creatures or artifacts to help pay."}
                 </p>
               )}
 

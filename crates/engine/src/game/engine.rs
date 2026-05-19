@@ -2340,7 +2340,12 @@ fn apply_action(
         (
             WaitingFor::ManaPayment {
                 player,
-                convoke_mode: Some(mode @ (ConvokeMode::Convoke | ConvokeMode::Waterbend)),
+                convoke_mode:
+                    Some(
+                        mode @ (ConvokeMode::Convoke
+                        | ConvokeMode::Waterbend
+                        | ConvokeMode::Improvise),
+                    ),
             },
             GameAction::TapForConvoke {
                 object_id,
@@ -2355,6 +2360,7 @@ fn apply_action(
             let is_eligible = match mode {
                 ConvokeMode::Convoke => obj.is_convoke_eligible(*player),
                 ConvokeMode::Waterbend => obj.is_waterbend_eligible(*player),
+                ConvokeMode::Improvise => obj.is_improvise_eligible(*player),
             };
             if !is_eligible {
                 return Err(EngineError::ActionNotAllowed(
@@ -2386,6 +2392,8 @@ fn apply_action(
                 }
                 // Waterbend always produces colorless
                 ConvokeMode::Waterbend => crate::types::mana::ManaType::Colorless,
+                // CR 702.126a: Improvise pays generic mana only — always colorless.
+                ConvokeMode::Improvise => crate::types::mana::ManaType::Colorless,
             };
             // Tap the permanent (no summoning sickness check — CR 702.51a + CR 302.6)
             if let Some(obj) = state.objects.get_mut(&object_id) {
@@ -2405,6 +2413,12 @@ fn apply_action(
                     false,
                     Vec::new(),
                 ),
+                // CR 702.126a/b: improvise mana exists only to pay this spell's
+                // generic cost — `convoke_payment` carries the restriction that
+                // keeps it from leaking into the pool as real mana.
+                ConvokeMode::Improvise => {
+                    crate::types::mana::ManaUnit::convoke_payment(resolved_mana_type, object_id)
+                }
             };
             if let Some(p) = state.players.iter_mut().find(|p| p.id == *player) {
                 p.mana_pool.add(unit);

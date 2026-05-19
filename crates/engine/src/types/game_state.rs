@@ -126,6 +126,8 @@ pub enum ConvokeMode {
     Convoke,
     /// Waterbend: always produces {1} colorless, emits Waterbend event.
     Waterbend,
+    /// CR 702.126a: Improvise — tap an untapped artifact to pay one generic mana.
+    Improvise,
 }
 
 /// CR 400.7: Snapshot of an object's characteristics at the time it left a public zone.

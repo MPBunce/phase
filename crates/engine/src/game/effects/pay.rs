@@ -482,7 +482,9 @@ fn max_resolution_mana_x_value(
     source_id: crate::types::identifiers::ObjectId,
     cost: &ManaCost,
 ) -> u32 {
-    let mut max = casting_costs::max_x_value(state, payer, cost);
+    // Resolution-time X costs are not spell casts — convoke/improvise/waterbend
+    // tap-payments do not apply, so no spell object is passed.
+    let mut max = casting_costs::max_x_value(state, payer, cost, None);
     loop {
         let mut concrete = cost.clone();
         concrete.concretize_x(max);

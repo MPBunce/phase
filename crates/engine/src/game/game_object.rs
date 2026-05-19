@@ -1023,6 +1023,15 @@ impl GameObject {
                 || self.card_types.core_types.contains(&CoreType::Artifact))
     }
 
+    /// CR 702.126a: Whether this object can be tapped for improvise mana.
+    /// Requires: on battlefield, untapped, artifact, controlled by `player`.
+    pub fn is_improvise_eligible(&self, player: PlayerId) -> bool {
+        self.controller == player
+            && self.zone == Zone::Battlefield
+            && !self.tapped
+            && self.card_types.core_types.contains(&CoreType::Artifact)
+    }
+
     /// Get the chosen subtype as a string, unified across creature types and basic land types.
     /// Used by the layer system's `AddChosenSubtype` modification.
     pub fn chosen_subtype_str(&self, kind: &ChosenSubtypeKind) -> Option<String> {

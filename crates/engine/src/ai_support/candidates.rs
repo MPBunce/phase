@@ -3016,6 +3016,17 @@ fn mana_payment_actions(
                         Some(player),
                     ));
                 }
+                ConvokeMode::Improvise if obj.is_improvise_eligible(player) => {
+                    // CR 702.126a: Improvise pays generic mana — always colorless.
+                    actions.push(candidate(
+                        GameAction::TapForConvoke {
+                            object_id: *obj_id,
+                            mana_type: crate::types::mana::ManaType::Colorless,
+                        },
+                        TacticalClass::Mana,
+                        Some(player),
+                    ));
+                }
                 ConvokeMode::Convoke if obj.is_convoke_eligible(player) => {
                     // CR 702.51a: Colorless (for generic) always available
                     actions.push(candidate(

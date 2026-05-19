@@ -2159,7 +2159,8 @@ pub(super) fn pay_and_push_adventure(
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
     // CR 702.51a: Convoke lets players tap creatures to reduce mana cost.
-    // CR 702.51: Check for Convoke or Waterbend keyword on the spell.
+    // CR 702.126a: Improvise lets players tap artifacts to pay generic mana.
+    // Check for Convoke, Waterbend, or Improvise keyword on the spell.
     let convoke_mode = state.objects.get(&object_id).and_then(|_| {
         let effective_keywords = super::casting::effective_spell_keywords(state, player, object_id);
         if effective_keywords
@@ -2172,6 +2173,11 @@ pub(super) fn pay_and_push_adventure(
             .any(|k| matches!(k, Keyword::Waterbend))
         {
             Some(ConvokeMode::Waterbend)
+        } else if effective_keywords
+            .iter()
+            .any(|k| matches!(k, Keyword::Improvise))
+        {
+            Some(ConvokeMode::Improvise)
         } else {
             None
         }
@@ -2181,6 +2187,7 @@ pub(super) fn pay_and_push_adventure(
         state.objects.values().any(|o| match mode {
             ConvokeMode::Convoke => o.is_convoke_eligible(player),
             ConvokeMode::Waterbend => o.is_waterbend_eligible(player),
+            ConvokeMode::Improvise => o.is_improvise_eligible(player),
         })
     });
 
@@ -3421,9 +3428,20 @@ fn score_combination(
 /// `ManaPayment` remains the authoritative check for whether the full colored
 /// cost is actually payable after the player commits an X value.
 ///
-/// CR 107.1b + CR 601.2f: X is chosen as part of determining total cost,
+/// When `object_id` is `Some`, the spell's tap-payment keywords (Convoke,
+/// Waterbend, Improvise) are accounted for: each eligible permanent that could
+/// be tapped to pay a generic mana raises the cap by one. This is required for
+/// X-spells with these keywords (CR 601.2b: X is announced before payment, so
+/// the cap must already reflect tap capacity per CR 702.126a/702.51a).
+///
+/// CR 601.2b + CR 601.2f: X is announced as part of determining total cost,
 /// before mana is paid.
-pub fn max_x_value(state: &GameState, player: PlayerId, cost: &ManaCost) -> u32 {
+pub fn max_x_value(
+    state: &GameState,
+    player: PlayerId,
+    cost: &ManaCost,
+    object_id: Option<ObjectId>,
+) -> u32 {
     let ManaCost::Cost { shards, generic } = cost else {
         return 0;
     };
@@ -3458,10 +3476,39 @@ pub fn max_x_value(state: &GameState, player: PlayerId, cost: &ManaCost) -> u32 
         .map(|&id| mana_sources::max_mana_yield(state, id, player))
         .sum();
 
+    // CR 702.126a / 702.51a: tap-payment keywords (Improvise/Convoke/Waterbend)
+    // let the caster pay generic mana by tapping permanents. Each eligible
+    // permanent raises the affordable X by one.
+    let tap_capacity: u32 = object_id.map_or(0, |oid| {
+        let effective_keywords = super::casting::effective_spell_keywords(state, player, oid);
+        let pred: Option<fn(&super::game_object::GameObject, PlayerId) -> bool> =
+            if effective_keywords
+                .iter()
+                .any(|k| matches!(k, Keyword::Improvise))
+            {
+                Some(super::game_object::GameObject::is_improvise_eligible)
+            } else if effective_keywords
+                .iter()
+                .any(|k| matches!(k, Keyword::Convoke))
+            {
+                Some(super::game_object::GameObject::is_convoke_eligible)
+            } else if effective_keywords
+                .iter()
+                .any(|k| matches!(k, Keyword::Waterbend))
+            {
+                Some(super::game_object::GameObject::is_waterbend_eligible)
+            } else {
+                None
+            };
+        pred.map_or(0, |p| {
+            state.objects.values().filter(|o| p(o, player)).count() as u32
+        })
+    });
+
     // CR 107.1b: Each `ManaCostShard::X` in the cost contributes `value` generic,
     // so for `{X}{X}` each point of X costs 2 mana. Dividing by `x_count` yields
     // the largest X the caster can actually afford.
-    let remaining = (pool + producible).saturating_sub(fixed_portion);
+    let remaining = (pool + producible + tap_capacity).saturating_sub(fixed_portion);
     remaining / x_count
 }
 
@@ -3487,7 +3534,7 @@ pub fn enter_payment_step(
     if let Some(pending) = state.pending_cast.as_ref() {
         if pending.ability.chosen_x.is_none() && cost_has_x(&pending.cost) {
             let min = pending.ability.min_x_value;
-            let max = max_x_value(state, player, &pending.cost);
+            let max = max_x_value(state, player, &pending.cost, Some(pending.object_id));
             if min > max {
                 let pending_for_cancel = pending.clone();
                 state.pending_cast = None;
@@ -7059,8 +7106,179 @@ mod tests {
         };
 
         // 3 lands + 2 Treasures = 5 sources, minus 1 for the {R} = max X of 4.
-        let max = max_x_value(&state, player, &cost);
+        let max = max_x_value(&state, player, &cost, None);
         assert_eq!(max, 4, "max X should count Treasure tokens as mana sources");
+    }
+
+    /// CR 702.51a + CR 601.2b: `max_x_value` must count Convoke-eligible
+    /// creatures as potential tap-payments so an X-spell with convoke gets a
+    /// raised cap. Untapped creatures the caster controls can pay generic mana.
+    #[test]
+    fn max_x_value_counts_convoke_creatures() {
+        use crate::game::scenario::GameScenario;
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(crate::types::Phase::PreCombatMain);
+
+        // 2 Islands (real mana producers) + 3 untapped creatures.
+        scenario.add_basic_land(PlayerId(0), ManaColor::Blue);
+        scenario.add_basic_land(PlayerId(0), ManaColor::Blue);
+        for _ in 0..3 {
+            scenario.add_vanilla(PlayerId(0), 1, 1);
+        }
+        // Convoke X-spell `{X}{U}` in hand.
+        let mut builder = scenario.add_spell_to_hand(PlayerId(0), "Convoke X-Spell", true);
+        builder.with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::X, ManaCostShard::Blue],
+            generic: 0,
+        });
+        let spell_id = builder.id();
+        builder.with_keyword(Keyword::Convoke);
+
+        let runner = scenario.build();
+        let state = runner.state();
+        let cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::X, ManaCostShard::Blue],
+            generic: 0,
+        };
+
+        // Without the spell context (no tap capacity): 2 Islands − {U} = 1.
+        assert_eq!(max_x_value(state, PlayerId(0), &cost, None), 1);
+        // With the spell context: +3 convoke creatures raises the cap to 4.
+        assert_eq!(
+            max_x_value(state, PlayerId(0), &cost, Some(spell_id)),
+            4,
+            "convoke creatures must raise the X cap"
+        );
+    }
+
+    /// Issue #490 discriminator: Whir of Invention `{X}{U}{U}{U}` (Improvise)
+    /// with 3 Islands + 3 artifacts. Pre-fix, `max_x_value` ignored improvise
+    /// tap capacity, so the X chooser was capped at 0 (producible 3 − fixed 3).
+    /// CR 702.126a: artifacts can pay the generic portion (the {X}), so X=3
+    /// must be choosable. With Step 4 reverted this test FAILS (`max == 0`).
+    #[test]
+    fn whir_of_invention_improvise_allows_full_x() {
+        use crate::game::scenario::GameScenario;
+        use crate::types::GameAction;
+
+        const WHIR_ORACLE: &str = "Improvise (Your artifacts can help cast this spell. \
+Each artifact you tap after you're done activating mana abilities pays for {1}.)\n\
+Search your library for an artifact card with mana value X or less, put it onto the \
+battlefield, then shuffle.";
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(crate::types::Phase::PreCombatMain);
+
+        // 3 untapped Islands — the only real mana producers.
+        let islands: Vec<ObjectId> = (0..3)
+            .map(|_| scenario.add_basic_land(PlayerId(0), ManaColor::Blue))
+            .collect();
+        // 3 untapped artifacts — improvise-eligible tap-payers.
+        let artifacts: Vec<ObjectId> = (0..3)
+            .map(|i| {
+                let mut b = scenario.add_creature(PlayerId(0), &format!("Artifact {i}"), 0, 0);
+                b.as_artifact();
+                b.id()
+            })
+            .collect();
+
+        // Whir of Invention `{X}{U}{U}{U}` with Improvise, parsed from Oracle.
+        let mut builder = scenario.add_spell_to_hand_from_oracle(
+            PlayerId(0),
+            "Whir of Invention",
+            true,
+            WHIR_ORACLE,
+        );
+        builder.with_mana_cost(ManaCost::Cost {
+            shards: vec![
+                ManaCostShard::X,
+                ManaCostShard::Blue,
+                ManaCostShard::Blue,
+                ManaCostShard::Blue,
+            ],
+            generic: 0,
+        });
+        // Re-run synthesis with an explicit keyword hint so the
+        // "Improvise (reminder text)" line is recognized as a keyword line.
+        builder.from_oracle_text_with_keywords(&["Improvise"], WHIR_ORACLE);
+        let spell_id = builder.id();
+
+        let mut runner = scenario.build();
+        let card_id = runner.state().objects[&spell_id].card_id;
+        assert!(
+            runner.state().objects[&spell_id]
+                .keywords
+                .contains(&Keyword::Improvise),
+            "Whir must parse with the Improvise keyword"
+        );
+
+        // Cast Whir — cost has X, so the engine enters ChooseXValue.
+        runner
+            .act(GameAction::CastSpell {
+                object_id: spell_id,
+                card_id,
+                targets: vec![],
+            })
+            .expect("casting Whir of Invention must be accepted");
+
+        // THE DISCRIMINATOR: with 3 Islands (producible 3) and a fixed portion
+        // of {U}{U}{U} (3), pre-fix `max` was 0. Improvise's 3 artifacts must
+        // raise it to 3.
+        match runner.state().waiting_for.clone() {
+            WaitingFor::ChooseXValue {
+                max, convoke_mode, ..
+            } => {
+                assert_eq!(
+                    convoke_mode,
+                    Some(ConvokeMode::Improvise),
+                    "Whir's keyword must be detected as Improvise"
+                );
+                assert_eq!(
+                    max, 3,
+                    "improvise artifacts must raise max X to 3 (pre-fix: 0)"
+                );
+            }
+            other => panic!("expected ChooseXValue, got {other:?}"),
+        }
+
+        // Choose X = 3.
+        runner
+            .act(GameAction::ChooseX { value: 3 })
+            .expect("choosing X=3 must be accepted");
+
+        // Pay the {U}{U}{U} with the 3 Islands.
+        for &island in &islands {
+            runner
+                .act(GameAction::ActivateAbility {
+                    source_id: island,
+                    ability_index: 0,
+                })
+                .expect("tapping an Island for {U} must be accepted");
+        }
+        // Pay the {3} generic by tapping the 3 artifacts via improvise.
+        for &artifact in &artifacts {
+            runner
+                .act(GameAction::TapForConvoke {
+                    object_id: artifact,
+                    mana_type: ManaType::Colorless,
+                })
+                .expect("tapping an artifact for improvise must be accepted");
+        }
+
+        // Finalize payment.
+        runner
+            .act(GameAction::PassPriority)
+            .expect("finalizing payment must be accepted");
+
+        // Whir is on the stack; the 3 artifacts are tapped.
+        assert_eq!(runner.state().stack.len(), 1, "Whir must be on the stack");
+        for &artifact in &artifacts {
+            assert!(
+                runner.state().objects[&artifact].tapped,
+                "improvise-tapped artifact must be tapped"
+            );
+        }
     }
 
     // -----------------------------------------------------------------------
