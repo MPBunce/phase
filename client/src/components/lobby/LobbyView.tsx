@@ -304,11 +304,13 @@ export function LobbyView({
             }
             className="bg-transparent py-1.5 text-base font-medium text-white outline-none"
           >
-            <option value={FILTER_ALL_SENTINEL}>All formats</option>
+            <option value={FILTER_ALL_SENTINEL} className="bg-[#0a0f1b] text-slate-100">
+              All formats
+            </option>
             {FORMAT_FILTER_GROUPS.map(({ group, items }) => (
-              <optgroup key={group} label={group}>
+              <optgroup key={group} label={group} className="bg-[#0a0f1b] text-slate-100">
                 {items.map((m) => (
-                  <option key={m.format} value={m.format}>
+                  <option key={m.format} value={m.format} className="bg-[#0a0f1b] text-slate-100">
                     {m.label}
                   </option>
                 ))}

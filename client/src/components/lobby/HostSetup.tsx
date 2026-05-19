@@ -246,9 +246,14 @@ export function HostSetup({
                 const items = availableFormats.filter((f) => f.group === group);
                 if (items.length === 0) return null;
                 return (
-                  <optgroup key={group} label={group}>
+                  <optgroup key={group} label={group} className="bg-[#0a0f1b] text-slate-100">
                     {items.map((opt) => (
-                      <option key={opt.format} value={opt.format} title={opt.description}>
+                      <option
+                        key={opt.format}
+                        value={opt.format}
+                        title={opt.description}
+                        className="bg-[#0a0f1b] text-slate-100"
+                      >
                         {opt.label}
                       </option>
                     ))}
