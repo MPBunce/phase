@@ -2187,7 +2187,7 @@ mod tests {
         assert_eq!(result, Some(PlayerId(1)));
     }
 
-    /// CR 603.7a + CR 109.4 + CR 603.10a: For `ZoneChanged` events
+    /// CR 603.6 + CR 109.4 + CR 603.10a: For `ZoneChanged` events
     /// (ETB, dies, discard, return-to-hand), `TriggeringPlayer` must
     /// resolve to the moving object's controller as captured in the
     /// `ZoneChangeRecord` snapshot — NOT the ability controller and
