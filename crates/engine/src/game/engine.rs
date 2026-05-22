@@ -11576,6 +11576,86 @@ mod exile_return_tests {
         );
     }
 
+    // #783: end-to-end integration. Component tests cover link creation and the
+    // return in isolation; this drives the WHOLE flow — exile via the real
+    // change_zone resolver (which must create the UntilSourceLeaves link), then
+    // the host actually leaves the battlefield via move_to_zone, then
+    // check_exile_returns runs on that event batch. The exiled permanent must
+    // return. CR 610.3a.
+    #[test]
+    fn exile_until_host_leaves_returns_card_through_full_pipeline() {
+        use crate::game::effects::change_zone;
+        use crate::game::zones::move_to_zone;
+        use crate::types::ability::{Duration, Effect, ResolvedAbility, TargetFilter, TargetRef};
+        use crate::types::card_type::CoreType;
+
+        let mut state = GameState::new_two_player(42);
+        state.turn_number = 2;
+        state.active_player = PlayerId(0);
+
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Banishing Light".to_string(),
+            Zone::Battlefield,
+        );
+        let victim_id = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Opponent's Bear".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&victim_id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        // "exile target nonland permanent ... until this enchantment leaves the
+        // battlefield" — exile resolves and must register the return link.
+        let mut exile = ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: Some(Zone::Battlefield),
+                destination: Zone::Exile,
+                target: TargetFilter::Any,
+                owner_library: false,
+                enter_transformed: false,
+                under_your_control: false,
+                enter_tapped: false,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+            },
+            vec![TargetRef::Object(victim_id)],
+            source_id,
+            PlayerId(0),
+        );
+        exile.duration = Some(Duration::UntilHostLeavesPlay);
+
+        let mut events = Vec::new();
+        change_zone::resolve(&mut state, &exile, &mut events).unwrap();
+        assert!(state.exile.contains(&victim_id), "victim should be exiled");
+        assert_eq!(state.exile_links.len(), 1, "exile link must be created");
+
+        // Host leaves the battlefield (e.g. destroyed or sacrificed).
+        let mut leave_events = Vec::new();
+        move_to_zone(&mut state, source_id, Zone::Graveyard, &mut leave_events);
+        check_exile_returns(&mut state, &mut leave_events);
+
+        assert!(
+            state.battlefield.contains(&victim_id),
+            "#783: exiled permanent must return when the host leaves the battlefield"
+        );
+        assert!(
+            !state.exile.contains(&victim_id),
+            "returned permanent must no longer be in exile"
+        );
+    }
+
     /// CR 610.3a: When a card exiled from hand (e.g., Deep-Cavern Bat) is returned,
     /// it goes back to hand, not to the battlefield.
     #[test]
