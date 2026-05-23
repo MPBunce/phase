@@ -24,7 +24,7 @@ use engine::game::validate_name_deck_for_format;
 use engine::types::game_state::GameState;
 use engine::types::player::PlayerId;
 use http::HeaderValue;
-use lobby_broker::{Broker, BrokerEnv, ConnState, Outbound};
+use lobby_broker::{check_build_commit, Broker, BrokerEnv, BuildCommitCheck, ConnState, Outbound};
 use seat_reducer::types::{DeckChoice, DeckResolver, ReducerCtx};
 use server_core::draft_session::DraftSessionManager;
 use server_core::lobby::RegisterGameRequest;
@@ -253,26 +253,6 @@ fn classify_hello_gate(
         (false, _) => HelloGateOutcome::RejectHandshakeRequired,
         (true, ClientMessage::ClientHello { .. }) => HelloGateOutcome::IgnoreRedundantHello,
         (true, _) => HelloGateOutcome::PassThrough,
-    }
-}
-
-/// Outcome of the build-commit check on `JoinGameWithPassword`. The host's
-/// and guest's commits must either both be populated and equal, or at least
-/// one must be empty (restored session, legacy client) for the join to proceed.
-#[derive(Debug, PartialEq, Eq)]
-enum BuildCommitCheck {
-    Allow,
-    Reject { host: String, guest: String },
-}
-
-fn check_build_commit(host_commit: &str, guest_commit: &str) -> BuildCommitCheck {
-    if !guest_commit.is_empty() && !host_commit.is_empty() && host_commit != guest_commit {
-        BuildCommitCheck::Reject {
-            host: host_commit.to_owned(),
-            guest: guest_commit.to_owned(),
-        }
-    } else {
-        BuildCommitCheck::Allow
     }
 }
 

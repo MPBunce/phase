@@ -70,16 +70,17 @@ pub enum Outbound {
     SendPlayerCountToSelf,
 }
 
-/// Result of the build-commit compatibility check.
+/// Result of the build-commit compatibility check. `pub` so the native shell's
+/// inline join/lookup arms reuse this single authority rather than duplicating it.
 #[derive(Debug, PartialEq, Eq)]
-enum BuildCommitCheck {
+pub enum BuildCommitCheck {
     Allow,
     Reject { host: String, guest: String },
 }
 
 /// Host and guest commits must either both be populated and equal, or at least
 /// one must be empty (restored session / legacy client) for a join to proceed.
-fn check_build_commit(host_commit: &str, guest_commit: &str) -> BuildCommitCheck {
+pub fn check_build_commit(host_commit: &str, guest_commit: &str) -> BuildCommitCheck {
     if !guest_commit.is_empty() && !host_commit.is_empty() && host_commit != guest_commit {
         BuildCommitCheck::Reject {
             host: host_commit.to_owned(),

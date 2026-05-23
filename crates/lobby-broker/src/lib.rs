@@ -12,7 +12,10 @@ pub mod env;
 pub mod lobby;
 pub mod protocol;
 
-pub use broker::{Broker, ClientHelloInfo, ConnState, Outbound, MAX_LOBBY_ENTRIES};
+pub use broker::{
+    check_build_commit, Broker, BuildCommitCheck, ClientHelloInfo, ConnState, Outbound,
+    MAX_LOBBY_ENTRIES,
+};
 pub use env::BrokerEnv;
 pub use lobby::{
     JoinTargetInfo, LobbyManager, LobbyReservation, RegisterGameRequest, PUBLIC_SEAT_RESERVATION_MS,
