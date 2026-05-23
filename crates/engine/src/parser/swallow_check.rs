@@ -1841,14 +1841,23 @@ fn detect_duration_this_turn(
         // remains visibly unsupported (`Unrecognized` is an explicit failure
         // node + coverage `supported=false`), so no gap is hidden.
         "\"condition\":{\"type\":\"Unrecognized\"",
-        // CR 101.2 + CR 604.1: `PerTurnCastLimit` / `PerTurnDrawLimit` static
-        // modes are themselves the per-turn enforcement window — the "this
-        // turn" / "each turn" scope is intrinsic to the variant and not a
-        // separate `duration` slot. Cards like Ethersworn Canonist phrase the
-        // subject as "...who has cast a [type] spell this turn..."; that
-        // "this turn" is consumed by the per-turn limit, not swallowed.
-        "PerTurnCastLimit",
-        "PerTurnDrawLimit",
+        // CR 601.2 + CR 601.3a + CR 604.1: `PerTurnCastLimit` / `PerTurnDrawLimit`
+        // static modes are themselves the per-turn enforcement window — the
+        // "this turn" / "each turn" scope is intrinsic to the variant and not
+        // a separate `duration` slot (CR 604.1 anchors the static; CR 601.2 +
+        // CR 601.3a authorize the casting prohibition itself). Cards like
+        // Ethersworn Canonist phrase the subject as "...who has cast a
+        // [type] spell this turn..."; that "this turn" is consumed by the
+        // per-turn limit, not swallowed.
+        //
+        // Markers use the serde-default external-tag JSON shape
+        // `"<Variant>":{` so they only match when the typed variant is the
+        // current node — matching the precision class of the
+        // `"condition":{"type":"Unrecognized"` marker above and ruling out
+        // false positives where the literal token "PerTurnCastLimit" appears
+        // in unrelated positions (e.g. a description string).
+        "\"PerTurnCastLimit\":{",
+        "\"PerTurnDrawLimit\":{",
     ];
     if json_has_any(ast_json, markers) {
         return;

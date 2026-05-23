@@ -6302,28 +6302,42 @@ fn strip_casting_prohibition_subject(tp: &str) -> Option<(ProhibitionScope, &str
         })
 }
 
-/// CR 101.2 + CR 604.1: Parse the "Each player who has cast a [type] spell this turn
-/// can't cast additional [type] spells." phrasing (Ethersworn Canonist) into the
-/// equivalent `PerTurnCastLimit { max: 1, spell_filter: <type> }`.
+/// CR 601.2 + CR 601.3a + CR 604.1: Parse the "<SUBJECT> who has cast a [type] spell
+/// this turn can't cast additional [type] spells." phrasing (Ethersworn Canonist) into
+/// the equivalent `PerTurnCastLimit { max: 1, spell_filter: <type> }`.
+///
+/// Casting prohibitions are authorized by CR 601.2 (legality-to-cast check) and CR
+/// 601.3a (the "qualities prohibit casting" rule); the per-turn enforcement window
+/// is the static itself (CR 604.1).
 ///
 /// The conditional subject ("who has cast a [type] spell this turn") combined with
 /// "can't cast additional [type] spells" is logically equivalent to "can't cast more
 /// than one [type] spell each turn" — once a player has cast a matching spell, every
 /// further matching spell is "additional" and prohibited.
 ///
-/// Both the subject-clause type and the object-clause type must match. If they diverge
-/// (a hypothetical future card like "who has cast an artifact spell ... can't cast
-/// noncreature spells"), the `max=1` reduction is no longer sound and we return `None`
-/// so the line falls through to other parsers (or `Unimplemented`).
+/// The subject prefix is parsed via the shared `strip_casting_prohibition_subject`
+/// building block so this combinator covers the full subject axis (each player, each
+/// opponent, you, your opponents, enchanted player — not just AllPlayers). Both the
+/// subject-clause type phrase and the object-clause type phrase must match. If they
+/// diverge (a hypothetical future card like "who has cast an artifact spell ... can't
+/// cast noncreature spells"), the `max=1` reduction is no longer sound and we return
+/// `None` so the line falls through to other parsers (or `Unimplemented`).
 fn parse_conditional_subject_per_turn_cast_limit(tp: &str, text: &str) -> Option<StaticDefinition> {
-    // Nom dispatch: assemble the full grammar as composed combinators.
-    //   "each player who has cast " ("a " | "an ") <SUBJECT_TYPE>
+    // 1. Strip subject prefix → scope, via the shared building block. This is the
+    //    single authority for subject→`ProhibitionScope` mapping; inlining a
+    //    hard-coded "each player" branch here would silently exclude every other
+    //    scope (each opponent, you, your opponents, enchanted player).
+    let (who, predicate) = strip_casting_prohibition_subject(tp)?;
+
+    // 2. Nom dispatch on the predicate: assemble the conditional-cast grammar as
+    //    composed combinators.
+    //   "who has cast " ("a " | "an ") <SUBJECT_TYPE>
     //   " spell this turn can't cast additional " <OBJECT_TYPE> " spells" "."?
     //
     // `take_until` is the canonical nom combinator for "everything up to delimiter",
-    // which is the structural counterpart to manually slicing on a found substring.
+    // the structural counterpart to manually slicing on a found substring.
     let mut parser = (
-        tag::<_, _, OracleError<'_>>("each player who has cast "),
+        tag::<_, _, OracleError<'_>>("who has cast "),
         alt((tag("a "), tag("an "))),
         take_until(" spell this turn can't cast additional "),
         tag(" spell this turn can't cast additional "),
@@ -6331,7 +6345,8 @@ fn parse_conditional_subject_per_turn_cast_limit(tp: &str, text: &str) -> Option
         tag(" spells"),
         opt(tag(".")),
     );
-    let (rest, (_, _, subject_type_text, _, object_type_text, _, _)) = parser.parse(tp).ok()?;
+    let (rest, (_, _, subject_type_text, _, object_type_text, _, _)) =
+        parser.parse(predicate).ok()?;
     // Disallow trailing content — we matched the entire restriction sentence.
     if !rest.trim().is_empty() {
         return None;
@@ -6353,13 +6368,13 @@ fn parse_conditional_subject_per_turn_cast_limit(tp: &str, text: &str) -> Option
         TargetFilter::Typed(tf) if !tf.type_filters.is_empty() => Some(subject_filter),
         _ => None,
     };
-    // Untyped "each player who has cast a spell" is not a real sentence in printed
+    // Untyped "<SUBJECT> who has cast a spell" is not a real sentence in printed
     // Magic; require a typed filter to avoid over-matching.
     spell_filter.as_ref()?;
 
     Some(
         StaticDefinition::new(StaticMode::PerTurnCastLimit {
-            who: ProhibitionScope::AllPlayers,
+            who,
             max: 1,
             spell_filter,
         })
@@ -6371,11 +6386,12 @@ fn parse_conditional_subject_per_turn_cast_limit(tp: &str, text: &str) -> Option
 /// Handles "Each player/opponent can't cast more than N [type] spell(s) each turn"
 /// and the alternate phrasing "You can cast no more than N spells each turn."
 fn parse_per_turn_cast_limit(tp: &str, text: &str) -> Option<StaticDefinition> {
-    // CR 101.2 + CR 604.1: Conditional-subject phrasing — "Each player who has cast a
-    // [type] spell this turn can't cast additional [type] spells." Semantically
-    // equivalent to `max=1` per-turn cast limit on the same [type] (Ethersworn Canonist).
-    // The two type phrases must match — if they diverge, the equivalence breaks and we
-    // bail (defensive: future cards with mismatched types would need a different model).
+    // CR 601.2 + CR 601.3a + CR 604.1: Conditional-subject phrasing — "<SUBJECT> who
+    // has cast a [type] spell this turn can't cast additional [type] spells."
+    // Semantically equivalent to `max=1` per-turn cast limit on the same [type]
+    // (Ethersworn Canonist). The two type phrases must match — if they diverge, the
+    // equivalence breaks and we bail (defensive: future cards with mismatched types
+    // would need a different model).
     if let Some(def) = parse_conditional_subject_per_turn_cast_limit(tp, text) {
         return Some(def);
     }
@@ -16155,6 +16171,82 @@ mod tests {
             tf.type_filters,
             vec![TypeFilter::Non(Box::new(TypeFilter::Artifact))]
         );
+    }
+
+    #[test]
+    fn per_turn_cast_limit_conditional_subject_creature_filter() {
+        // Class test: same conditional-subject grammar with a different matched
+        // type — proves the building block works across the type-filter axis,
+        // not just Ethersworn's Non(Artifact). Hypothetical future printed text.
+        let def = parse_static_line(
+            "Each player who has cast a creature spell this turn can't cast additional creature spells.",
+        )
+        .unwrap();
+        let StaticMode::PerTurnCastLimit {
+            who,
+            max,
+            spell_filter,
+        } = &def.mode
+        else {
+            panic!("expected PerTurnCastLimit, got {:?}", def.mode);
+        };
+        assert_eq!(*who, ProhibitionScope::AllPlayers);
+        assert_eq!(*max, 1);
+        let Some(TargetFilter::Typed(tf)) = spell_filter else {
+            panic!("expected typed spell filter, got {spell_filter:?}");
+        };
+        assert_eq!(tf.type_filters, vec![TypeFilter::Creature]);
+    }
+
+    #[test]
+    fn per_turn_cast_limit_conditional_subject_instant_filter() {
+        // Class test: third filter axis to lock in the building-block behavior.
+        let def = parse_static_line(
+            "Each player who has cast an instant spell this turn can't cast additional instant spells.",
+        )
+        .unwrap();
+        let StaticMode::PerTurnCastLimit { spell_filter, .. } = &def.mode else {
+            panic!("expected PerTurnCastLimit, got {:?}", def.mode);
+        };
+        let Some(TargetFilter::Typed(tf)) = spell_filter else {
+            panic!("expected typed spell filter, got {spell_filter:?}");
+        };
+        assert_eq!(tf.type_filters, vec![TypeFilter::Instant]);
+    }
+
+    #[test]
+    fn per_turn_cast_limit_conditional_subject_each_opponent_scope() {
+        // Class test (subject axis): "Each opponent who has cast..." must produce
+        // `Opponents` scope, not the hard-coded `AllPlayers`. Proves the subject
+        // prefix is dispatched through `strip_casting_prohibition_subject` instead
+        // of being inlined. Hypothetical future printed text within the class.
+        let def = parse_static_line(
+            "Each opponent who has cast a creature spell this turn can't cast additional creature spells.",
+        )
+        .unwrap();
+        let StaticMode::PerTurnCastLimit { who, max, .. } = &def.mode else {
+            panic!("expected PerTurnCastLimit, got {:?}", def.mode);
+        };
+        assert_eq!(*who, ProhibitionScope::Opponents);
+        assert_eq!(*max, 1);
+    }
+
+    #[test]
+    fn per_turn_cast_limit_conditional_subject_you_scope() {
+        // Class test (subject axis): "You who have cast..." would not be natural
+        // English, but the helper accepts the "you " subject prefix; we lock in
+        // the building-block behavior for completeness across the
+        // `strip_casting_prohibition_subject` outputs that have a trailing space
+        // suitable for the "who has cast" continuation. The "you " arm of the
+        // shared subject helper covers cards like Arcane Laboratory variants.
+        let def = parse_static_line(
+            "You who has cast a creature spell this turn can't cast additional creature spells.",
+        )
+        .unwrap();
+        let StaticMode::PerTurnCastLimit { who, .. } = &def.mode else {
+            panic!("expected PerTurnCastLimit, got {:?}", def.mode);
+        };
+        assert_eq!(*who, ProhibitionScope::Controller);
     }
 
     #[test]
