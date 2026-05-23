@@ -6006,6 +6006,26 @@ mod tests {
     }
 
     #[test]
+    fn damage_applier_life_floor_does_not_increase_damage() {
+        let repl = damage_repl(DamageModification::LifeFloor { minimum: 1 });
+        let mut state = test_state_with_damage_repl(ObjectId(10), PlayerId(0), vec![repl]);
+        state.players[1].life = 10;
+        let mut events = Vec::new();
+        let rid = ReplacementId {
+            source: ObjectId(10),
+            index: 0,
+        };
+
+        let result = damage_done_applier(damage_event(2), rid, &mut state, &mut events);
+        match result {
+            ApplyResult::Modified(ProposedEvent::Damage { amount, .. }) => {
+                assert_eq!(amount, 2);
+            }
+            other => panic!("Expected Modified Damage, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn damage_applier_life_floor_caps_damage_that_would_go_below_floor() {
         let repl = damage_repl(DamageModification::LifeFloor { minimum: 1 });
         let mut state = test_state_with_damage_repl(ObjectId(10), PlayerId(0), vec![repl]);
