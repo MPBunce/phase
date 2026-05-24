@@ -34724,6 +34724,28 @@ mod tests {
     }
 
     #[test]
+    fn each_opponent_loses_life_equal_to_life_you_gained_stays_lose_life() {
+        let def = parse_effect_chain(
+            "Each opponent loses life equal to the amount of life you gained this turn.",
+            AbilityKind::Spell,
+        );
+
+        assert_eq!(def.player_scope, Some(PlayerFilter::Opponent));
+        let Effect::LoseLife { amount, target } = &*def.effect else {
+            panic!("expected LoseLife, got {:?}", def.effect);
+        };
+        assert_eq!(target, &None);
+        assert!(matches!(
+            amount,
+            QuantityExpr::Ref {
+                qty: QuantityRef::LifeGainedThisTurn {
+                    player: PlayerScope::Controller
+                }
+            }
+        ));
+    }
+
+    #[test]
     fn each_opponent_gets_counter_keeps_followup_unscoped() {
         let def = parse_effect_chain(
             "Each opponent gets a poison counter. Draw a card.",
