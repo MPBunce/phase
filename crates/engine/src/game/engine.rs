@@ -40,6 +40,7 @@ use super::priority;
 use super::public_state::{
     bump_state_revision, finalize_public_state, mark_public_state_all_dirty, sync_waiting_for,
 };
+use super::sba;
 use super::triggers;
 use super::turn_control;
 use super::turns;
@@ -158,6 +159,21 @@ pub fn apply(
 }
 
 fn reconcile_terminal_result(state: &mut GameState, result: &mut ActionResult) {
+    // Safety net (fixes #962): If a player-loss SBA would eliminate a player,
+    // run SBAs now. CR 704.3 normally checks SBAs when a player would receive
+    // priority, but skipping them here can leave the engine waiting on a dead
+    // player for a non-priority choice.
+    //
+    // The predicate lives in `sba` so it shares the same CR 101.2 "can't lose"
+    // exception as the real player-loss SBA checks, and stays narrower than the
+    // full SBA loop to avoid unrelated mid-resolution SBA prompts.
+    if sba::has_pending_player_loss_sba(state) {
+        sba::check_state_based_actions(state, &mut result.events);
+        // SBA may have advanced waiting_for (e.g., GameOver, or Priority for
+        // the next living player). Sync the result.
+        result.waiting_for = state.waiting_for.clone();
+    }
+
     super::elimination::ensure_game_over_if_terminal(state, &mut result.events);
     if matches!(state.waiting_for, WaitingFor::GameOver { .. }) {
         match_flow::handle_game_over_transition(state);
@@ -5492,11 +5508,13 @@ mod tests {
     use crate::types::ability::{
         AbilityCost, AbilityDefinition, AbilityKind, AbilityTag, ControllerRef, Effect,
         GainLifePlayer, ManaContribution, ManaProduction, ManaSpendRestriction, QuantityExpr,
-        ResolvedAbility, TargetFilter, TriggerDefinition, TypeFilter, TypedFilter,
+        ResolvedAbility, StaticDefinition, TargetFilter, TriggerDefinition, TypeFilter,
+        TypedFilter,
     };
     use crate::types::card_type::CardType;
     use crate::types::card_type::CoreType;
     use crate::types::counter::CounterType;
+    use crate::types::format::FormatConfig;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
     use crate::types::TriggerMode;
@@ -5527,6 +5545,105 @@ mod tests {
         remember_public_reveals(&mut state, &events);
 
         assert!(state.public_revealed_cards.contains(&card_id));
+    }
+
+    #[test]
+    fn terminal_reconcile_does_not_run_sbas_for_cant_lose_player() {
+        let mut state = GameState::new(FormatConfig::commander(), 2, 42);
+        let protected = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Platinum Angel".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&protected)
+            .expect("protected source exists")
+            .static_definitions
+            .push(StaticDefinition::new(StaticMode::CantLoseTheGame).affected(
+                TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::You)),
+            ));
+
+        let commander = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Kaalia".to_string(),
+            Zone::Command,
+        );
+        let commander_obj = state
+            .objects
+            .get_mut(&commander)
+            .expect("commander object exists");
+        commander_obj.is_commander = true;
+        commander_obj.card_types.core_types.push(CoreType::Creature);
+        let mut move_events = Vec::new();
+        zones::move_to_zone(&mut state, commander, Zone::Battlefield, &mut move_events);
+        zones::move_to_zone(&mut state, commander, Zone::Graveyard, &mut move_events);
+
+        // CR 101.2 + CR 704.5a: Platinum Angel means P0 cannot lose from
+        // 0-or-less life. The
+        // non-priority DiscardChoice should therefore remain active; otherwise
+        // the full SBA loop would notice the unrelated dead commander and
+        // replace the choice with CommanderZoneChoice.
+        state.players[0].life = 0;
+        state.waiting_for = WaitingFor::DiscardChoice {
+            player: PlayerId(0),
+            count: 1,
+            cards: Vec::new(),
+            source_id: ObjectId(999),
+            effect_kind: EffectKind::DiscardCard,
+            up_to: false,
+            unless_filter: None,
+        };
+        let original_waiting_for = state.waiting_for.clone();
+        let mut result = ActionResult {
+            events: Vec::new(),
+            waiting_for: original_waiting_for.clone(),
+            log_entries: Vec::new(),
+        };
+
+        reconcile_terminal_result(&mut state, &mut result);
+
+        assert_eq!(state.waiting_for, original_waiting_for);
+        assert_eq!(result.waiting_for, original_waiting_for);
+        assert!(!state.players[0].is_eliminated);
+        assert_eq!(state.objects[&commander].zone, Zone::Graveyard);
+    }
+
+    #[test]
+    fn terminal_reconcile_runs_player_loss_sba_for_unprotected_player() {
+        let mut state = GameState::new_two_player(42);
+        state.players[0].life = 0;
+        state.waiting_for = WaitingFor::DiscardChoice {
+            player: PlayerId(0),
+            count: 1,
+            cards: Vec::new(),
+            source_id: ObjectId(999),
+            effect_kind: EffectKind::DiscardCard,
+            up_to: false,
+            unless_filter: None,
+        };
+        let mut result = ActionResult {
+            events: Vec::new(),
+            waiting_for: state.waiting_for.clone(),
+            log_entries: Vec::new(),
+        };
+
+        reconcile_terminal_result(&mut state, &mut result);
+
+        // CR 704.5a: An unprotected player at 0 life loses before the engine
+        // keeps waiting for that player's non-priority discard choice.
+        assert!(state.players[0].is_eliminated);
+        assert!(matches!(
+            result.waiting_for,
+            WaitingFor::GameOver {
+                winner: Some(PlayerId(1)),
+                ..
+            }
+        ));
     }
 
     /// Create a DealDamage ability for testing.
