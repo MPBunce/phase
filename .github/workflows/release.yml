@@ -332,6 +332,11 @@ jobs:
           # on the menu (see __IS_RELEASE_BUILD__ in vite.config.ts). The staging
           # deploy (deploy.yml) deliberately omits this so it never self-links.
           RELEASE_BUILD: "true"
+          # Cloud-sync config. The anon/publishable key is client-safe (RLS is the
+          # access control), so it's baked into the bundle. Empty (secret unset) →
+          # cloud sync stays disabled and the app falls back to file backup.
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
         run: |
           cd client
           pnpm install --frozen-lockfile
@@ -903,6 +908,11 @@ jobs:
           # so this reaches vite.config.ts. Surfaces the preview-build CTA in the
           # desktop app too (it routes through openExternal → shell open).
           RELEASE_BUILD: "true"
+          # Cloud-sync config reaches vite.config.ts via the same beforeBuildCommand
+          # path; without these the desktop build ships with cloud sync disabled.
+          # Anon key is client-safe (RLS gates access).
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
