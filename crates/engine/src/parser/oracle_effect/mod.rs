@@ -5784,6 +5784,11 @@ fn thread_for_each_subject(effect: Effect, original: &str) -> Effect {
     };
     let target = application.affected;
     let is_targeted = application.target.is_some();
+    let pump_target = if application.inherits_parent {
+        TargetFilter::ParentTarget
+    } else {
+        target.clone()
+    };
 
     // Only replace default/placeholder targets — leave already-resolved targets alone.
     match effect {
@@ -5797,11 +5802,12 @@ fn thread_for_each_subject(effect: Effect, original: &str) -> Effect {
             toughness,
             target: TargetFilter::Any,
         } => {
-            if is_targeted || subject::is_single_object_ref(&target) {
+            if application.inherits_parent || is_targeted || subject::is_single_object_ref(&target)
+            {
                 Effect::Pump {
                     power,
                     toughness,
-                    target,
+                    target: pump_target,
                 }
             } else {
                 Effect::PumpAll {
@@ -31456,6 +31462,59 @@ mod tests {
             }
             other => panic!("expected Pump, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn for_each_pump_that_creature_uses_parent_target() {
+        let def = parse_effect_chain(
+            "that creature gets -1/-1 until end of turn for each land card in your graveyard",
+            AbilityKind::Spell,
+        );
+        match &*def.effect {
+            Effect::Pump {
+                power,
+                toughness,
+                target: TargetFilter::ParentTarget,
+            } => {
+                assert_eq!(def.duration, Some(Duration::UntilEndOfTurn));
+                assert!(matches!(
+                    power,
+                    PtValue::Quantity(QuantityExpr::Multiply { factor: -1, .. })
+                ));
+                assert!(matches!(
+                    toughness,
+                    PtValue::Quantity(QuantityExpr::Multiply { factor: -1, .. })
+                ));
+            }
+            other => panic!("expected parent-targeted Pump, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn target_then_mill_then_that_creature_for_each_pump_preserves_target() {
+        let def = parse_effect_chain(
+            "Choose target creature. Mill four cards, then that creature gets -1/-1 until end of turn for each land card in your graveyard.",
+            AbilityKind::Spell,
+        );
+        let mill = def
+            .sub_ability
+            .as_ref()
+            .expect("TargetOnly should chain to Mill");
+        let pump = mill
+            .sub_ability
+            .as_ref()
+            .expect("Mill should chain to the parent-targeted pump");
+        assert!(
+            matches!(
+                &*pump.effect,
+                Effect::Pump {
+                    target: TargetFilter::ParentTarget,
+                    ..
+                }
+            ),
+            "expected final pump to target the chosen creature, got {:?}",
+            pump.effect
+        );
     }
 
     #[test]
