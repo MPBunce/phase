@@ -5,8 +5,9 @@ use super::restriction::*;
 use super::support::*;
 use super::*;
 use crate::types::ability::{
-    AggregateFunction, CardTypeSetSource, CountScope, Duration, Effect, ObjectProperty,
-    PlayerScope, PtStat, PtValueScope, SharedQuality, SharedQualityRelation, TypeFilter, ZoneRef,
+    ActivationRestriction, AggregateFunction, CardTypeSetSource, CountScope, Duration, Effect,
+    ObjectProperty, PlayerScope, PtStat, PtValueScope, SharedQuality, SharedQualityRelation,
+    TypeFilter, ZoneRef,
 };
 use crate::types::counter::CounterType;
 use crate::types::keywords::Keyword;
@@ -3490,6 +3491,77 @@ fn quoted_ability_sacrifice_cost_separator() {
         ),
         "effect should not be Unimplemented, got {:?}",
         def.effect
+    );
+}
+
+#[test]
+fn quoted_ability_preserves_activation_restrictions() {
+    // CR 602.5c: A granted activated ability carrying a trailing use
+    // restriction inside its quoted text must surface that restriction on the
+    // acquired ability — not drop it as an unparsed sentence. CR 602.5d:
+    // "Activate only as a sorcery" → AsSorcery timing gate. This is the path
+    // for Skygames ("Enchanted land has \"{T}: ... Activate only as a
+    // sorcery.\""), Mindwhip Sliver, and Squirrel anthem cards.
+    let def =
+        parse_static_line("Enchanted land has \"{T}: Draw a card. Activate only as a sorcery.\"")
+            .unwrap();
+    let grant = def
+        .modifications
+        .iter()
+        .find(|m| matches!(m, ContinuousModification::GrantAbility { .. }))
+        .expect("should grant the quoted activated ability");
+    let ContinuousModification::GrantAbility { definition } = grant else {
+        unreachable!();
+    };
+    assert_eq!(definition.kind, AbilityKind::Activated);
+    assert!(definition.cost.is_some(), "should retain the tap cost");
+    assert!(
+        definition.sorcery_speed,
+        "AsSorcery must set sorcery_speed on the granted ability"
+    );
+    assert!(
+        definition
+            .activation_restrictions
+            .contains(&ActivationRestriction::AsSorcery),
+        "granted ability must carry AsSorcery, got {:?}",
+        definition.activation_restrictions
+    );
+    assert!(
+        !matches!(
+            *definition.effect,
+            crate::types::ability::Effect::Unimplemented { .. }
+        ),
+        "the draw effect must still parse, got {:?}",
+        definition.effect
+    );
+
+    // CR 602.5b: Non-sorcery restrictions use the same single-authority
+    // extractor and must surface on the granted copy too.
+    let once = parse_static_line(
+        "Creatures you control have \"{T}: Draw a card. Activate only during your turn and only once each turn.\"",
+    )
+    .unwrap();
+    let grant = once
+        .modifications
+        .iter()
+        .find(|m| matches!(m, ContinuousModification::GrantAbility { .. }))
+        .expect("should grant the quoted activated ability");
+    let ContinuousModification::GrantAbility { definition } = grant else {
+        unreachable!();
+    };
+    assert!(
+        definition
+            .activation_restrictions
+            .contains(&ActivationRestriction::DuringYourTurn),
+        "granted ability must carry DuringYourTurn, got {:?}",
+        definition.activation_restrictions
+    );
+    assert!(
+        definition
+            .activation_restrictions
+            .contains(&ActivationRestriction::OnlyOnceEachTurn),
+        "granted ability must carry OnlyOnceEachTurn, got {:?}",
+        definition.activation_restrictions
     );
 }
 
