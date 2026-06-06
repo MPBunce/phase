@@ -1,11 +1,12 @@
 import { useMemo } from "react";
 import { useTranslation } from "react-i18next";
 
-import { useDraftStore } from "../../stores/draftStore";
+import type { DraftCardInstance } from "../../adapter/draft-adapter";
 
 // ── Types ───────────────────────────────────────────────────────────────
 
 interface ManaCurveProps {
+  pool: DraftCardInstance[];
   cards: string[];
 }
 
@@ -16,11 +17,8 @@ const MAX_BAR_HEIGHT = 100;
 
 // ── Component ───────────────────────────────────────────────────────────
 
-const EMPTY_POOL: never[] = [];
-
-export function ManaCurve({ cards }: ManaCurveProps) {
+export function ManaCurve({ pool, cards }: ManaCurveProps) {
   const { t } = useTranslation("draft");
-  const pool = useDraftStore((s) => s.view?.pool) ?? EMPTY_POOL;
 
   const counts = useMemo(() => {
     const cmcByName = new Map<string, number>();
