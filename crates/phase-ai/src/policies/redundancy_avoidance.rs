@@ -378,6 +378,7 @@ fn redundancy_delta(
         | Effect::SeparateIntoPiles { .. }
         | Effect::SwitchPT { .. }
         | Effect::CopySpell { .. }
+        | Effect::EpicCopy { .. }
         | Effect::CastCopyOfCard { .. }
         | Effect::CopyTokenOf { .. }
         | Effect::Myriad
@@ -431,6 +432,7 @@ fn redundancy_delta(
         | Effect::CreateEmblem { .. }
         | Effect::PayCost { .. }
         | Effect::CastFromZone { .. }
+        | Effect::FreeCastFromZones { .. }
         | Effect::PreventDamage { .. }
         | Effect::LoseTheGame { .. }
         | Effect::WinTheGame { .. }
@@ -487,12 +489,14 @@ fn redundancy_delta(
         | Effect::GiveControl { .. }
         | Effect::RemoveFromCombat { .. }
         | Effect::Conjure { .. }
+        | Effect::DraftFromSpellbook { .. }
         | Effect::Tribute { .. }
         | Effect::Unimplemented { .. }
         // CR 702.85a: Cascade has no targets or redundancy — the redundancy
         // policy treats it as a no-op here; the cascade resolver handles the
         // cast-or-decline choice through its own WaitingFor state.
         | Effect::Cascade
+        | Effect::Ripple { .. }
         | Effect::Reveal { .. }
         // CR 702.xxx: Prepare (Strixhaven) — no redundancy detection.
         | Effect::BecomePrepared { .. }

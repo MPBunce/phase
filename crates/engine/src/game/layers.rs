@@ -5,6 +5,7 @@ use crate::database::synthesis::KeywordTriggerInstaller;
 use crate::game::arithmetic::saturating_pt_add;
 use crate::game::devotion::count_devotion;
 use crate::game::filter::{matches_target_filter, FilterContext};
+use crate::game::game_object::DisplaySource;
 use crate::game::printed_cards::{apply_copiable_values, intrinsic_copiable_values};
 use crate::game::quantity::{filter_uses_recipient, quantity_expr_uses_recipient, QuantityContext};
 use crate::game::speed::{effective_speed, has_max_speed};
@@ -1201,6 +1202,28 @@ pub fn evaluate_layers(state: &mut GameState) {
             // re-applies the copied source's `printed_ref` below for objects
             // under a copy effect, so a temporary copy's art reverts on expiry.
             obj.printed_ref = obj.base_printed_ref.clone();
+            // Reset display routing to the object's own derived baseline so a
+            // copy effect's override (set by `CopyValues` below) reverts on
+            // expiry. Display routing is derived state, not a copiable value
+            // (CR 707.2): a true token — created by a token-making effect
+            // (CR 111.1), so carrying no printed identity — routes to the token
+            // art database; everything else (a real card, or a token-copy *of a
+            // real card*, which carries `base_printed_ref`) routes to the card
+            // database. Deriving here (rather than storing a `base_display_source`)
+            // keeps tokens in pre-existing saved states correct on load.
+            obj.display_source = if obj.is_token && obj.base_printed_ref.is_none() {
+                DisplaySource::Token
+            } else {
+                DisplaySource::Card
+            };
+            // A nontoken never has its own token-art pointer, so clear it to its
+            // baseline (`None`); a copy-of-token effect re-applies the source
+            // token's `token_image_ref` below while active. A true token keeps
+            // its own pointer (its baseline), which the copy layer overrides only
+            // while it is copying another object.
+            if !obj.is_token {
+                obj.token_image_ref = None;
+            }
             // CR 613.1b: Reset controller to the object's base controller;
             // Layer 2 re-applies continuous control-changing effects.
             obj.controller = obj.base_controller.unwrap_or(obj.owner);
@@ -1349,6 +1372,12 @@ pub fn evaluate_layers(state: &mut GameState) {
             }
         }
     }
+
+    // CR 113.11: "It's also impossible for an effect or keyword counter to add
+    // [a denied] ability to the object." The keyword-counter grant above runs
+    // after the in-loop Layer 6 denial, so re-apply the denial to strip any
+    // counter-granted keyword that a `CantHaveKeyword` static forbids.
+    apply_cant_have_keyword_denials(state, None);
 
     // CR 306.5c: Loyalty is tracked via loyalty counters. After the layer reset
     // reverts obj.loyalty to base_loyalty, re-derive it from the actual counter.
@@ -1895,6 +1924,12 @@ fn apply_layers_incremental(state: &mut GameState, entered_ids: &HashSet<ObjectI
             }
         }
     }
+
+    // CR 113.11: re-apply the can't-have denial after the keyword-counter grant
+    // (which runs after the in-loop Layer 6 denial) so a counter can't add a
+    // forbidden keyword. Restricted to the freshly-entered objects, mirroring the
+    // incremental denial hook above.
+    apply_cant_have_keyword_denials(state, Some(entered_ids));
 
     // CR 613.11: Combat-assignment rule effects, restricted to entered objects.
     apply_combat_assignment_rule_effects_filtered(state, Some(entered_ids));
@@ -3321,13 +3356,22 @@ fn apply_continuous_effect_filtered(
         match &effect.modification {
             ContinuousModification::CopyValues {
                 values,
+                display_source,
                 printed_ref,
+                token_image_ref,
             } => {
                 apply_copiable_values(obj, values);
-                // Display identity follows the copy: override the baseline
+                // Display routing follows the copy: override the baseline
                 // restored by the layer reset so the copy renders the source's
                 // art. Reverts automatically when the copy effect expires.
+                // CR 111.1 + CR 707.2: for a copy of a true token, the source's
+                // `display_source = Token` + `token_image_ref` carry the art (the
+                // copied name has no real-card printing); for a printed source,
+                // `display_source = Card` + `printed_ref`. None are copiable
+                // values — purely display routing.
+                obj.display_source = *display_source;
                 obj.printed_ref = printed_ref.clone();
+                obj.token_image_ref = token_image_ref.clone();
             }
             // CR 707.9b + CR 707.2: Name override is a copiable-value override
             // applied at Layer 1 after the base CopyValues (ordered by timestamp
@@ -5035,6 +5079,68 @@ mod tests {
                 .unwrap()
                 .has_keyword(&Keyword::Flying),
             "CantHaveKeyword denial must strip Flying granted by the concurrent anthem"
+        );
+    }
+
+    /// CR 113.11 + CR 122.1b: a "can't have [keyword]" effect makes it impossible
+    /// for even a KEYWORD COUNTER to add that ability. A first-strike counter on a
+    /// creature under an Archetype-of-Courage-style `CantHaveKeyword { FirstStrike }`
+    /// denial must NOT grant first strike. The keyword-counter grant ran after the
+    /// denial pass with no re-denial, so the counter wrongly re-added the keyword.
+    #[test]
+    fn cant_have_keyword_denial_overrides_keyword_counter() {
+        use crate::types::counter::CounterType;
+        use crate::types::keywords::KeywordKind;
+
+        let mut state = setup();
+        let bear = make_creature(&mut state, "Bear", 2, 2, PlayerId(0));
+        state
+            .objects
+            .get_mut(&bear)
+            .unwrap()
+            .counters
+            .insert(CounterType::Keyword(KeywordKind::FirstStrike), 1);
+
+        // Baseline: the keyword counter grants first strike with no denial present.
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+        assert!(
+            state
+                .objects
+                .get(&bear)
+                .unwrap()
+                .has_keyword(&Keyword::FirstStrike),
+            "keyword counter grants first strike before the denial is added"
+        );
+
+        // Archetype of Courage: creatures can't have first strike (Layer 6 denial).
+        let denial = StaticDefinition::new(StaticMode::CantHaveKeyword {
+            keyword: Keyword::FirstStrike,
+        })
+        .affected(TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)));
+        let archetype = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Archetype of Courage".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&archetype).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_card_types = obj.card_types.clone();
+            obj.static_definitions.push(denial);
+        }
+
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+        assert!(
+            !state
+                .objects
+                .get(&bear)
+                .unwrap()
+                .has_keyword(&Keyword::FirstStrike),
+            "CR 113.11: a keyword counter cannot grant a denied keyword"
         );
     }
 
@@ -10452,7 +10558,9 @@ mod tests {
             TargetFilter::SpecificObject { id: target },
             vec![ContinuousModification::CopyValues {
                 values: Box::new(copy_values),
+                display_source: crate::game::game_object::DisplaySource::Card,
                 printed_ref: None,
+                token_image_ref: None,
             }],
             None,
         );

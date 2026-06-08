@@ -68,6 +68,24 @@ pub fn printed_ref_from_face(card_face: &CardFace) -> Option<PrintedCardRef> {
         })
 }
 
+fn printed_colors_from_face(card_face: &CardFace) -> Vec<ManaColor> {
+    if let Some(colors) = &card_face.color_override {
+        return colors.clone();
+    }
+    // CR 702.114a + CR 604.3: Devoid is a characteristic-defining ability
+    // ("this object is colorless") that functions in all zones. MTGJSON normally
+    // supplies `color_override: Some([])` for devoid cards, so this branch is only
+    // a missing-data backstop; explicit color overrides remain authoritative.
+    if card_face
+        .keywords
+        .iter()
+        .any(|k| matches!(k, Keyword::Devoid))
+    {
+        return Vec::new();
+    }
+    derive_colors_from_mana_cost(&card_face.mana_cost)
+}
+
 pub fn apply_card_face_to_object(obj: &mut GameObject, card_face: &CardFace) {
     // CR 716.2b: capture the pre-call init flag so we can distinguish
     // first-time face application from re-application by
@@ -86,10 +104,7 @@ pub fn apply_card_face_to_object(obj: &mut GameObject, card_face: &CardFace) {
         .as_ref()
         .and_then(|value| value.parse::<u32>().ok());
     let keywords = card_face.keywords.clone();
-    let color = card_face
-        .color_override
-        .clone()
-        .unwrap_or_else(|| derive_colors_from_mana_cost(&card_face.mana_cost));
+    let color = printed_colors_from_face(card_face);
 
     obj.name = card_face.name.clone();
     obj.power = power;
@@ -133,6 +148,7 @@ pub fn apply_card_face_to_object(obj: &mut GameObject, card_face: &CardFace) {
     // this each pass (see `game_object::base_printed_ref`).
     obj.base_printed_ref = obj.printed_ref.clone();
     obj.source_related_token_ids = card_face.metadata.related_token_ids.clone();
+    obj.spellbook = card_face.metadata.spellbook.clone();
     obj.modal = card_face.modal.clone();
     obj.additional_cost = card_face.additional_cost.clone();
     obj.strive_cost = card_face.strive_cost.clone();
@@ -154,6 +170,20 @@ pub fn apply_card_face_to_object(obj: &mut GameObject, card_face: &CardFace) {
     // CR 716.3: Each Class enchantment enters the battlefield at level 1.
     if !was_initialized && card_face.card_type.subtypes.iter().any(|s| s == "Class") {
         obj.class_level = Some(1);
+    }
+
+    // CR 306.5c + CR 310.4c: Rehydration must not clobber live counter-tracked
+    // loyalty/defense. `rehydrate_game_from_card_db` re-applies printed faces
+    // mid-game (multiplayer sync); the counter map is authoritative on the
+    // battlefield, while off-battlefield loyalty/defense intentionally remains
+    // the printed value per CR 306.5a / CR 310.4a.
+    if was_initialized && obj.zone == Zone::Battlefield {
+        if let Some(&loyalty_counters) = obj.counters.get(&CounterType::Loyalty) {
+            obj.loyalty = Some(loyalty_counters);
+        }
+        if let Some(&defense_counters) = obj.counters.get(&CounterType::Defense) {
+            obj.defense = Some(defense_counters);
+        }
     }
 
     // CR 719.1: Initialize Case solve state from the card face.
@@ -194,10 +224,7 @@ pub fn apply_card_face_to_back_face(back_face: &mut BackFaceData, card_face: &Ca
         .defense
         .as_ref()
         .and_then(|value| value.parse::<u32>().ok());
-    let color = card_face
-        .color_override
-        .clone()
-        .unwrap_or_else(|| derive_colors_from_mana_cost(&card_face.mana_cost));
+    let color = printed_colors_from_face(card_face);
 
     back_face.name = card_face.name.clone();
     back_face.power = power;
@@ -401,6 +428,9 @@ fn collect_conjure_names_from_face(face: &CardFace, out: &mut Vec<String>) {
     for replacement in &face.replacements {
         walk_replacement(replacement, out);
     }
+    // Alchemy spellbook: every card a spellbook draft can produce must be in the
+    // registry to be instantiable by the conjure path.
+    out.extend(face.metadata.spellbook.iter().cloned());
 }
 
 fn walk_ability_def(def: &AbilityDefinition, out: &mut Vec<String>) {
@@ -581,6 +611,11 @@ fn walk_effect(effect: &Effect, out: &mut Vec<String>) {
                 out.push(conjure_card.name.clone());
             }
         }
+        // A spellbook draft conjures the chosen card, but the list lives on the
+        // card face (`metadata.spellbook`), not in the effect — the registry
+        // seed collects it directly from the face (see
+        // `collect_conjure_names_from_face`), so nothing to gather here.
+        Effect::DraftFromSpellbook { .. } => {}
         // Nested-ability carriers — descend.
         Effect::Vote {
             per_choice_effect, ..
@@ -716,6 +751,7 @@ fn walk_effect(effect: &Effect, out: &mut Vec<String>) {
         | Effect::Clash
         | Effect::SwitchPT { .. }
         | Effect::CopySpell { .. }
+        | Effect::EpicCopy { .. }
         | Effect::CastCopyOfCard { .. }
         | Effect::CopyTokenOf { .. }
         | Effect::Myriad
@@ -763,6 +799,7 @@ fn walk_effect(effect: &Effect, out: &mut Vec<String>) {
         | Effect::AddPendingETBCounters { .. }
         | Effect::PayCost { .. }
         | Effect::CastFromZone { .. }
+        | Effect::FreeCastFromZones { .. }
         | Effect::PreventDamage { .. }
         | Effect::LoseTheGame { .. }
         | Effect::WinTheGame { .. }
@@ -785,6 +822,7 @@ fn walk_effect(effect: &Effect, out: &mut Vec<String>) {
         | Effect::RevealUntil { .. }
         | Effect::Discover { .. }
         | Effect::Cascade
+        | Effect::Ripple { .. }
         | Effect::MiracleCast { .. }
         | Effect::MadnessCast { .. }
         | Effect::PutAtLibraryPosition { .. }
@@ -900,6 +938,75 @@ fn build_conjure_registry(
     }
 
     (registry, all_collected)
+}
+
+/// CR 712 / CR 715 / CR 722: Attach the other printed face to `obj.back_face`
+/// when absent. Required for transformed zone changes (Fable of the
+/// Mirror-Breaker chapter III, Ajani flip triggers), adventurer casts, MDFC
+/// casts, and prepare spell access. Without this, `deliver_replaced_zone_change`
+/// silently skips transform when `back_face` is `None` and saga ETB lore-counter
+/// replacements fire on the front face.
+pub fn populate_back_face_if_dfc(obj: &mut GameObject, db: &CardDatabase, card_face: &CardFace) {
+    if obj.back_face.is_some() {
+        return;
+    }
+
+    let second_face = db
+        .get_by_name(&card_face.name)
+        .and_then(|card_rules| match &card_rules.layout {
+            // CR 715: Adventurer cards have alternative Adventure characteristics.
+            CardLayout::Adventure(_, back) => Some((LayoutKind::Adventure, back)),
+            // CR 712: Transforming, modal, meld, and omen DFCs need their other face.
+            CardLayout::Transform(_, back) => Some((LayoutKind::Transform, back)),
+            CardLayout::Modal(_, back) => Some((LayoutKind::Modal, back)),
+            CardLayout::Meld(_, back) => Some((LayoutKind::Meld, back)),
+            CardLayout::Omen(_, back) => Some((LayoutKind::Omen, back)),
+            // CR 722: Preparation cards expose prepare-spell characteristics.
+            CardLayout::Prepare(_, back) => Some((LayoutKind::Prepare, back)),
+            _ => None,
+        })
+        .or_else(|| {
+            let layout_kind = card_face
+                .scryfall_oracle_id
+                .as_deref()
+                .and_then(|id| db.get_layout_kind(id))
+                .unwrap_or(LayoutKind::Single);
+            obj.printed_ref
+                .as_ref()
+                .and_then(|printed_ref| db.get_other_face_by_printed_ref(printed_ref))
+                .map(|face| (layout_kind, face))
+        });
+    let Some((layout_kind, face)) = second_face else {
+        return;
+    };
+
+    let mut back = BackFaceData {
+        name: String::new(),
+        power: None,
+        toughness: None,
+        loyalty: None,
+        defense: None,
+        card_types: Default::default(),
+        mana_cost: Default::default(),
+        keywords: Vec::new(),
+        abilities: Vec::new(),
+        trigger_definitions: crate::types::definitions::Definitions::default(),
+        replacement_definitions: crate::types::definitions::Definitions::default(),
+        static_definitions: crate::types::definitions::Definitions::default(),
+        color: Vec::new(),
+        printed_ref: None,
+        modal: None,
+        additional_cost: None,
+        strive_cost: None,
+        casting_restrictions: Vec::new(),
+        casting_options: Vec::new(),
+        layout_kind: None,
+    };
+    apply_card_face_to_back_face(&mut back, face);
+    if layout_kind != LayoutKind::Single {
+        back.layout_kind = Some(layout_kind);
+    }
+    obj.back_face = Some(back);
 }
 
 pub fn rehydrate_game_from_card_db(state: &mut GameState, db: &CardDatabase) {
@@ -1050,69 +1157,7 @@ pub fn rehydrate_game_from_card_db(state: &mut GameState, db: &CardDatabase) {
                 }
             }
 
-            // Populate back_face for dual-faced layouts so the other face's
-            // characteristics are available for transform, adventure cast, and
-            // preview display (Ctrl-hover).
-            if obj.back_face.is_none() {
-                let second_face = db
-                    .get_by_name(&card_face.name)
-                    .and_then(|card_rules| match &card_rules.layout {
-                        // CR 715: Adventure half available at cast time
-                        CardLayout::Adventure(_, back) => Some((LayoutKind::Adventure, back)),
-                        // CR 712: Transform / Modal DFC / Meld / Omen back face
-                        CardLayout::Transform(_, back) => Some((LayoutKind::Transform, back)),
-                        CardLayout::Modal(_, back) => Some((LayoutKind::Modal, back)),
-                        CardLayout::Meld(_, back) => Some((LayoutKind::Meld, back)),
-                        CardLayout::Omen(_, back) => Some((LayoutKind::Omen, back)),
-                        // CR 702.xxx: Prepare (Strixhaven) — face `b` is the prepare spell
-                        // (Sorcery/Instant), held in back_face for runtime copy-cast access.
-                        CardLayout::Prepare(_, back) => Some((LayoutKind::Prepare, back)),
-                        _ => None,
-                    })
-                    .or_else(|| {
-                        // Fallback for export-loaded databases where `cards` is empty.
-                        // Use the layout_index (populated from the `layout` field in
-                        // card-data.json) to determine the correct LayoutKind.
-                        let layout_kind = card_face
-                            .scryfall_oracle_id
-                            .as_deref()
-                            .and_then(|id| db.get_layout_kind(id))
-                            .unwrap_or(LayoutKind::Single);
-                        obj.printed_ref
-                            .as_ref()
-                            .and_then(|printed_ref| db.get_other_face_by_printed_ref(printed_ref))
-                            .map(|face| (layout_kind, face))
-                    });
-                if let Some((layout_kind, face)) = second_face {
-                    let mut back = BackFaceData {
-                        name: String::new(),
-                        power: None,
-                        toughness: None,
-                        loyalty: None,
-                        defense: None,
-                        card_types: Default::default(),
-                        mana_cost: Default::default(),
-                        keywords: Vec::new(),
-                        abilities: Vec::new(),
-                        trigger_definitions: crate::types::definitions::Definitions::default(),
-                        replacement_definitions: crate::types::definitions::Definitions::default(),
-                        static_definitions: crate::types::definitions::Definitions::default(),
-                        color: Vec::new(),
-                        printed_ref: None,
-                        modal: None,
-                        additional_cost: None,
-                        strive_cost: None,
-                        casting_restrictions: Vec::new(),
-                        casting_options: Vec::new(),
-                        layout_kind: None,
-                    };
-                    apply_card_face_to_back_face(&mut back, face);
-                    if layout_kind != LayoutKind::Single {
-                        back.layout_kind = Some(layout_kind);
-                    }
-                    obj.back_face = Some(back);
-                }
-            }
+            populate_back_face_if_dfc(obj, db, &card_face);
         }
 
         changed_any = true;
@@ -1289,6 +1334,77 @@ mod tests {
             rarities: Default::default(),
             attraction_lights: vec![],
         }
+    }
+
+    /// CR 604.3: explicit all-zone color data is authoritative even when a face
+    /// also has Devoid. Production devoid cards normally enter through this path
+    /// with `color_override: Some([])`.
+    #[test]
+    fn color_override_wins_for_devoid_face() {
+        let mut face = test_face(
+            "Touch of the Void",
+            "touch-of-the-void-oracle-id",
+            vec![CoreType::Instant],
+            ManaCost::Cost {
+                shards: vec![ManaCostShard::Red],
+                generic: 1,
+            },
+        );
+        // Without Devoid, the {1}{R} cost would make it red.
+        assert_eq!(
+            derive_colors_from_mana_cost(&face.mana_cost),
+            vec![ManaColor::Red]
+        );
+        face.color_override = Some(vec![ManaColor::Red]);
+        face.keywords.push(Keyword::Devoid);
+
+        let mut obj = GameObject::new(
+            ObjectId(1),
+            CardId(0),
+            PlayerId(0),
+            face.name.clone(),
+            Zone::Hand,
+        );
+        apply_card_face_to_object(&mut obj, &face);
+
+        assert_eq!(obj.color, vec![ManaColor::Red]);
+        assert_eq!(obj.base_color, vec![ManaColor::Red]);
+    }
+
+    /// CR 702.114a + CR 604.3: if all-zone color data is missing, Devoid is a
+    /// backstop that builds the face colorless outside the battlefield too.
+    #[test]
+    fn devoid_face_without_color_override_falls_back_to_colorless() {
+        let mut face = test_face(
+            "Muraganda Eldrazi",
+            "muraganda-eldrazi-oracle-id",
+            vec![CoreType::Creature],
+            ManaCost::Cost {
+                shards: vec![ManaCostShard::Green],
+                generic: 3,
+            },
+        );
+        face.keywords.push(Keyword::Devoid);
+
+        let mut obj = GameObject::new(
+            ObjectId(1),
+            CardId(0),
+            PlayerId(0),
+            face.name.clone(),
+            Zone::Hand,
+        );
+        apply_card_face_to_object(&mut obj, &face);
+
+        assert!(
+            obj.color.is_empty(),
+            "devoid object must be colorless; got {:?}",
+            obj.color
+        );
+        assert!(
+            obj.base_color.is_empty(),
+            "devoid base color must be colorless; got {:?}",
+            obj.base_color
+        );
     }
 
     /// CR 111.1 + CR 707.2 + CR 704.5j: A non-legendary token that's a copy of
@@ -1590,6 +1706,62 @@ mod tests {
         );
     }
 
+    /// CR 712.14a: Transform DFCs (Fable of the Mirror-Breaker) must hydrate
+    /// `back_face` from the export so chapter-III `enter_transformed` returns
+    /// work at resolution time.
+    #[test]
+    fn populate_back_face_attaches_transform_dfc_back_from_export() {
+        let fable = test_face(
+            "Fable of the Mirror-Breaker",
+            "fable-oracle-id",
+            vec![CoreType::Enchantment],
+            ManaCost::Cost {
+                shards: vec![ManaCostShard::Red],
+                generic: 2,
+            },
+        );
+        let reflection = test_face(
+            "Reflection of Kiki-Jiki",
+            "fable-oracle-id",
+            vec![CoreType::Creature],
+            ManaCost::default(),
+        );
+        let mut fable_json = serde_json::to_value(&fable).unwrap();
+        fable_json["layout"] = serde_json::json!("transform");
+        let mut reflection_json = serde_json::to_value(&reflection).unwrap();
+        reflection_json["layout"] = serde_json::json!("transform");
+        let export = serde_json::json!({
+            "fable of the mirror-breaker": fable_json,
+            "reflection of kiki-jiki": reflection_json,
+        })
+        .to_string();
+        let db = CardDatabase::from_json_str(&export).expect("export db should parse");
+
+        let mut state = GameState::default();
+        let object_id = create_object_from_card_face(
+            &mut state,
+            db.get_face_by_name("Fable of the Mirror-Breaker").unwrap(),
+            PlayerId(0),
+        );
+        let obj = state.objects.get_mut(&object_id).unwrap();
+        populate_back_face_if_dfc(
+            obj,
+            &db,
+            db.get_face_by_name("Fable of the Mirror-Breaker").unwrap(),
+        );
+
+        let back_face = obj
+            .back_face
+            .as_ref()
+            .expect("transform DFC must hydrate back_face from export");
+        assert_eq!(back_face.name, "Reflection of Kiki-Jiki");
+        assert_eq!(
+            back_face.layout_kind,
+            Some(LayoutKind::Transform),
+            "transform back face must carry LayoutKind::Transform"
+        );
+    }
+
     #[test]
     fn rehydrate_uses_hidden_prepare_face_when_back_face_name_collides() {
         let front = test_face(
@@ -1770,6 +1942,114 @@ mod tests {
             state.objects.get(&object_id).unwrap().class_level,
             Some(3),
             "CR 716.2b: rehydration must preserve the advanced level"
+        );
+    }
+
+    /// CR 306.5c: Rehydration must preserve live loyalty counters on battlefield
+    /// planeswalkers (Daretti, Scrap Savant regression).
+    #[test]
+    fn rehydrate_preserves_planeswalker_loyalty_counters() {
+        let mut face = test_face(
+            "Daretti, Scrap Savant",
+            "daretti-scrap-savant-oracle-id",
+            vec![CoreType::Planeswalker],
+            ManaCost::default(),
+        );
+        face.loyalty = Some("3".to_string());
+        let export = serde_json::json!({
+            "daretti, scrap savant": serde_json::to_value(&face).unwrap(),
+        })
+        .to_string();
+        let db = CardDatabase::from_json_str(&export).expect("export db should parse");
+
+        let mut state = GameState::new_two_player(42);
+        let pw_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Daretti, Scrap Savant".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&pw_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Planeswalker);
+            obj.base_loyalty = Some(3);
+            obj.loyalty = Some(1);
+            obj.counters.insert(CounterType::Loyalty, 1);
+            obj.base_characteristics_initialized = true;
+            obj.printed_ref = printed_ref_from_face(&face);
+            obj.base_printed_ref = obj.printed_ref.clone();
+        }
+
+        rehydrate_game_from_card_db(&mut state, &db);
+
+        assert_eq!(
+            state.objects.get(&pw_id).unwrap().loyalty,
+            Some(1),
+            "rehydration must not reset loyalty to printed base when counters differ"
+        );
+        assert_eq!(
+            state
+                .objects
+                .get(&pw_id)
+                .unwrap()
+                .counters
+                .get(&CounterType::Loyalty),
+            Some(&1)
+        );
+    }
+
+    /// CR 310.4c: Rehydration must preserve live defense counters on battlefield
+    /// battles, matching the planeswalker loyalty path.
+    #[test]
+    fn rehydrate_preserves_battle_defense_counters() {
+        let mut face = test_face(
+            "Invasion of Testoria",
+            "invasion-of-testoria-oracle-id",
+            vec![CoreType::Battle],
+            ManaCost::default(),
+        );
+        face.defense = Some("5".to_string());
+        let export = serde_json::json!({
+            "invasion of testoria": serde_json::to_value(&face).unwrap(),
+        })
+        .to_string();
+        let db = CardDatabase::from_json_str(&export).expect("export db should parse");
+
+        let mut state = GameState::new_two_player(42);
+        let battle_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Invasion of Testoria".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&battle_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Battle);
+            obj.base_defense = Some(5);
+            obj.defense = Some(2);
+            obj.counters.insert(CounterType::Defense, 2);
+            obj.base_characteristics_initialized = true;
+            obj.printed_ref = printed_ref_from_face(&face);
+            obj.base_printed_ref = obj.printed_ref.clone();
+        }
+
+        rehydrate_game_from_card_db(&mut state, &db);
+
+        assert_eq!(
+            state.objects.get(&battle_id).unwrap().defense,
+            Some(2),
+            "rehydration must not reset defense to printed base when counters differ"
+        );
+        assert_eq!(
+            state
+                .objects
+                .get(&battle_id)
+                .unwrap()
+                .counters
+                .get(&CounterType::Defense),
+            Some(&2)
         );
     }
 

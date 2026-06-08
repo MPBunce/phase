@@ -656,12 +656,24 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
         }
     }
 
-    // "Forage" — exile three cards from graveyard or sacrifice a Food (CR 701.61)
+    // "Forage" — exile three cards from your graveyard or sacrifice a Food
+    // (CR 701.61a). A modal cost: both ways are offered, so a player who can't
+    // exile three cards can still forage by sacrificing a Food (and vice versa).
     if lower == "forage" {
-        return AbilityCost::Exile {
-            count: 3,
-            zone: Some(Zone::Graveyard),
-            filter: None,
+        return AbilityCost::OneOf {
+            costs: vec![
+                AbilityCost::Exile {
+                    count: 3,
+                    zone: Some(Zone::Graveyard),
+                    filter: None,
+                },
+                AbilityCost::Sacrifice {
+                    target: TargetFilter::Typed(
+                        TypedFilter::permanent().subtype("Food".to_string()),
+                    ),
+                    count: 1,
+                },
+            ],
         };
     }
 
@@ -690,6 +702,26 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
     .is_some()
     {
         return AbilityCost::Unattach;
+    }
+
+    // "reveal your hand" — reveal the controller's entire hand.
+    // CR 701.20a: Reveal means show to all players. Used as alternative cost
+    // (Land Grant class). Modeled as EffectCost wrapping Effect::RevealHand.
+    // Verified: CR 701.20 (docs/MagicCompRules.txt:3430).
+    if nom_on_lower(text, &lower, |i| {
+        value((), tag("reveal your hand")).parse(i)
+    })
+    .is_some()
+    {
+        return AbilityCost::EffectCost {
+            effect: Box::new(crate::types::ability::Effect::RevealHand {
+                target: TargetFilter::SelfRef,
+                card_filter: TargetFilter::Any,
+                count: None,
+                random: false,
+                choice_optional: false,
+            }),
+        };
     }
 
     // "Reveal this card from your hand" — reveal self cost

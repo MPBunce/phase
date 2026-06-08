@@ -46,6 +46,10 @@ pub(crate) fn try_parse_graveyard_keyword_grant_clause(
             value(GraveyardGrantedKeywordKind::Flashback, tag("flashback")),
             value(GraveyardGrantedKeywordKind::Escape, tag("escape")),
             value(GraveyardGrantedKeywordKind::Mayhem, tag("mayhem")),
+            // CR 702.97 / CR 702.141: Varolz, Young Deathclaws (scavenge);
+            // Wire Surgeons (encore) grant activated graveyard keywords.
+            value(GraveyardGrantedKeywordKind::Scavenge, tag("scavenge")),
+            value(GraveyardGrantedKeywordKind::Encore, tag("encore")),
         ))
         .parse(i)
     })?
@@ -616,6 +620,38 @@ pub(crate) fn parse_continuous_modifications(text: &str) -> Vec<ContinuousModifi
     }
     if let Some(toughness) = parse_base_toughness_mod(&unquoted_text) {
         modifications.push(ContinuousModification::SetToughness { value: toughness });
+    }
+
+    // CR 509.1b + CR 613.4b: "can't be blocked [this turn] and has/have base power
+    // and toughness N/N" — the restriction conjunct precedes the base-PT conjunct.
+    // `extract_keyword_clause` only recovers the trailing conjunct, so scan the
+    // leading restriction explicitly (Atomic Microsizer).
+    if let Some((restriction_text, _)) =
+        nom_primitives::scan_split_at_phrase(&unquoted_lower, |i| {
+            (
+                tag("and "),
+                alt((tag("has"), tag("have"))),
+                tag(" base power"),
+            )
+                .parse(i)
+        })
+    {
+        let restriction_text = restriction_text.trim();
+        if let Some(modes) = parse_restriction_modes(restriction_text) {
+            for mode in modes {
+                if static_mode_needs_grant_propagation(&mode)
+                    && !modifications.iter().any(|existing| {
+                        matches!(
+                            existing,
+                            ContinuousModification::AddStaticMode { mode: existing_mode }
+                                if *existing_mode == mode
+                        )
+                    })
+                {
+                    modifications.push(ContinuousModification::AddStaticMode { mode });
+                }
+            }
+        }
     }
 
     for modification in parse_quoted_ability_modifications(text_stripped) {

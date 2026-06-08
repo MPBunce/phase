@@ -704,6 +704,7 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::SeparateIntoPiles
         | EffectKind::SwitchPT
         | EffectKind::CopySpell
+        | EffectKind::EpicCopy
         | EffectKind::CopyTokenOf
         | EffectKind::Myriad
         | EffectKind::Encore
@@ -750,6 +751,7 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::CreateEmblem
         | EffectKind::PayCost
         | EffectKind::CastFromZone
+        | EffectKind::FreeCastFromZones
         | EffectKind::PreventDamage
         | EffectKind::CreateDamageReplacement
         | EffectKind::Regenerate
@@ -777,6 +779,7 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::ExileFromTopUntil
         | EffectKind::RevealUntil
         | EffectKind::Cascade
+        | EffectKind::Ripple
         | EffectKind::MiracleCast
         | EffectKind::MadnessCast
         | EffectKind::PutAtLibraryPosition
@@ -810,6 +813,7 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::GiveControl
         | EffectKind::RemoveFromCombat
         | EffectKind::Conjure
+        | EffectKind::DraftFromSpellbook
         | EffectKind::ChooseOneOf
         | EffectKind::Specialize
         | EffectKind::Unimplemented

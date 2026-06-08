@@ -341,6 +341,9 @@ pub fn guard_game_action_payload(action: &GameAction) -> Result<(), String> {
         GameAction::ChooseOption { choice, .. } => {
             bound_string("ChooseOption.choice", choice)?;
         }
+        GameAction::SubmitSpellbookDraft { card } => {
+            bound_string("SubmitSpellbookDraft.card", card)?;
+        }
         GameAction::Debug(debug_action) => {
             guard_debug_action_payload(debug_action)?;
         }
@@ -351,6 +354,8 @@ pub fn guard_game_action_payload(action: &GameAction) -> Result<(), String> {
         | GameAction::ChooseUntap { .. }
         | GameAction::ChooseExert { .. }
         | GameAction::ChooseClashOpponent { .. }
+        | GameAction::ChooseAssistPlayer { .. }
+        | GameAction::CommitAssistPayment { .. }
         | GameAction::MulliganDecision { .. }
         | GameAction::TapLandForMana { .. }
         | GameAction::UntapLandForMana { .. }
@@ -367,6 +372,7 @@ pub fn guard_game_action_payload(action: &GameAction) -> Result<(), String> {
         | GameAction::ChooseBranch { .. }
         | GameAction::ChooseDamageSource { .. }
         | GameAction::DecideOptionalCost { .. }
+        | GameAction::RespondToSpliceOffer { .. }
         | GameAction::ChooseAdventureFace { .. }
         | GameAction::ChooseModalFace { .. }
         | GameAction::ChooseAlternativeCast { .. }
@@ -401,6 +407,8 @@ pub fn guard_game_action_payload(action: &GameAction) -> Result<(), String> {
         | GameAction::CompanionToHand
         | GameAction::DiscoverChoice { .. }
         | GameAction::CascadeChoice { .. }
+        | GameAction::RippleChoice { .. }
+        | GameAction::FreeCastWindowChoice { .. }
         | GameAction::ChooseTopOrBottom { .. }
         // CR 702.140c: mutate merge side carries a single typed enum — nothing
         // client-controlled to bound.

@@ -166,6 +166,18 @@ pub enum GameAction {
     ChooseClashOpponent {
         opponent: PlayerId,
     },
+    /// CR 702.132a: Assist — the caster's answer to `WaitingFor::AssistChoosePlayer`.
+    /// `Some(p)` chooses player `p` (one of the prompt's `candidates`) to help pay
+    /// the generic mana; `None` declines and proceeds to normal payment.
+    ChooseAssistPlayer {
+        player: Option<PlayerId>,
+    },
+    /// CR 702.132a: Assist — the chosen player's answer to `WaitingFor::AssistPayment`.
+    /// `generic` is how much of the spell's generic mana they pay (0 = nothing),
+    /// capped at the prompt's `max_generic`.
+    CommitAssistPayment {
+        generic: u32,
+    },
     /// CR 103.5 + 103.5b: A player's decision at a `WaitingFor::MulliganDecision`
     /// prompt. See [`MulliganChoice`] for the three branches.
     MulliganDecision {
@@ -269,6 +281,12 @@ pub enum GameAction {
     },
     ChooseOption {
         choice: String,
+    },
+    /// Alchemy spellbook draft: the player's chosen card name in response to
+    /// `WaitingFor::SpellbookDraft`. The named card is conjured into the
+    /// pending destination.
+    SubmitSpellbookDraft {
+        card: String,
     },
     /// CR 700.3 + CR 700.3a: Submit one pile (pile A) of a
     /// `SeparateIntoPiles` partition. Pile B is derived by the engine as
@@ -426,6 +444,13 @@ pub enum GameAction {
     DecideOptionalEffect {
         accept: bool,
     },
+    /// CR 702.47a–e: Respond to a `WaitingFor::SpliceOffer`. `Some(card)` splices
+    /// that card from hand onto the spell being cast (re-presenting the offer for
+    /// any remaining eligible cards, CR 702.47e); `None` declines/finishes
+    /// splicing and proceeds to target selection.
+    RespondToSpliceOffer {
+        card: Option<ObjectId>,
+    },
     DecideOptionalEffectAndRemember {
         choice: AutoMayChoice,
     },
@@ -500,6 +525,20 @@ pub enum GameAction {
     /// CR 702.85a: Choose to cast the cascaded card without paying its mana cost.
     CascadeChoice {
         choice: CastChoice,
+    },
+    /// CR 702.60a: Choose to cast a revealed same-named ripple card for free.
+    RippleChoice {
+        choice: CastChoice,
+    },
+    /// CR 608.2g + CR 601.2: Pick one candidate to cast for free from an open
+    /// `WaitingFor::CastOffer { FreeCastWindow }` (Invoke Calamity), or `None`
+    /// to finish the window without casting (further) spells. Distinct from the
+    /// binary `CastChoice` used by Cascade/Discover/Ripple because the player
+    /// chooses *which* of several offered cards to cast, not merely whether to
+    /// cast a single pre-selected one.
+    FreeCastWindowChoice {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        selection: Option<crate::types::identifiers::ObjectId>,
     },
     /// CR 401.4: Choose top or bottom of library.
     ChooseTopOrBottom {
@@ -1244,11 +1283,13 @@ impl GameAction {
             | GameAction::SubmitSideboard { .. }
             | GameAction::ChoosePlayDraw { .. }
             | GameAction::ChooseOption { .. }
+            | GameAction::SubmitSpellbookDraft { .. }
             | GameAction::SubmitPilePartition { .. }
             | GameAction::ChoosePile { .. }
             | GameAction::ChooseBranch { .. }
             | GameAction::SelectModes { .. }
             | GameAction::DecideOptionalCost { .. }
+            | GameAction::RespondToSpliceOffer { .. }
             | GameAction::ChooseAdventureFace { .. }
             | GameAction::ChooseModalFace { .. }
             | GameAction::ChooseAlternativeCast { .. }
@@ -1268,10 +1309,14 @@ impl GameAction {
             | GameAction::CompanionToHand
             | GameAction::DiscoverChoice { .. }
             | GameAction::CascadeChoice { .. }
+            | GameAction::RippleChoice { .. }
+            | GameAction::FreeCastWindowChoice { .. }
             | GameAction::ChooseTopOrBottom { .. }
             | GameAction::ChooseMutateMergeSide { .. }
             | GameAction::CipherEncode { .. }
             | GameAction::ChooseClashOpponent { .. }
+            | GameAction::ChooseAssistPlayer { .. }
+            | GameAction::CommitAssistPayment { .. }
             | GameAction::ChooseBattleProtector { .. }
             | GameAction::SetAutoPass { .. }
             | GameAction::CancelAutoPass

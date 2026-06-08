@@ -283,6 +283,8 @@
     "graveyardShort": "CEM",
     "graveyardTitle": "Cemitério ({{count}})",
     "libraryAlt": "Grimório",
+    "library": "Grimório",
+    "libraryLower": "grimório",
     "libraryCount_one": "Grimório ({{count}} carta)",
     "libraryCount_other": "Grimório ({{count}} cartas)",
     "playFromTop": "Jogue {{name}} do topo do grimório",
@@ -726,6 +728,14 @@
       "titleChooseOne": "{{effect}} a Menos Que Você Pague Um",
       "dontPay": "Não Pagar",
       "takeEffect": "Aceitar o Efeito"
+    },
+    "spliceOffer": {
+      "title": "Unir com Arcano?",
+      "subtitle": "Escolha uma carta para revelar e unir a esta mágica, ou conjure sem unir.",
+      "spliceCard": "Unir {{name}}",
+      "decline": "Não Unir",
+      "declineDescription": "Conjure a mágica sem adicionar o texto de outra carta.",
+      "unknownCard": "Carta #{{id}}"
     },
     "activationCost": {
       "title": "Escolher Custo de Ativação"
@@ -1235,15 +1245,27 @@
   "cascadeChoice": {
     "cascadeEyebrow": "Cascata",
     "discoverEyebrow": "Descobrir",
+    "rippleEyebrow": "Ripple",
     "title": "Conjurar {{name}}?",
     "subtitleCascade": "Cascata exilou {{name}} (valor de mana abaixo de {{sourceMv}}). Conjure-a sem pagar seu custo de mana, ou recuse e embaralhe todas as {{total}} cartas exiladas no fundo de seu grimório.",
     "subtitleDiscover": "Descobrir exilou {{name}}. Conjure-a sem pagar seu custo de mana, ou coloque-a em sua mão e embaralhe as outras {{missCount}} cartas exiladas no fundo de seu grimório.",
+    "subtitleRipple": "Ripple revelou {{name}}. Conjure-a sem pagar seu custo de mana, ou recuse e coloque todas as {{total}} cartas reveladas no fundo de seu grimório em ordem aleatória.",
     "castNamed": "Conjurar {{name}}",
     "castSuffix": "(sem pagar seu custo de mana)",
     "putIntoHand": "Colocar na mão",
     "decline": "Recusar",
     "discoverDeclineSuffix": "(colocar o restante no fundo)",
     "cascadeDeclineSuffix": "(embaralhar todas as cartas exiladas no fundo)"
+  },
+  "freeCastWindow": {
+    "eyebrow": "Conjuração grátis",
+    "title": "Conjure uma mágica de graça",
+    "subtitle": "Escolha uma mágica para conjurar sem pagar seu custo de mana ({{remaining}} restante(s)). Valor de mana total restante: {{budget}}.",
+    "subtitleNoBudget": "Escolha uma mágica para conjurar sem pagar seu custo de mana ({{remaining}} restante(s)).",
+    "castNamed": "Conjurar {{name}}",
+    "castSuffix": "(sem pagar seu custo de mana)",
+    "done": "Concluído",
+    "doneSuffix": "(pare de conjurar mágicas desta forma)"
   },
   "castingVariant": {
     "eyebrow": "Conjurar",
@@ -1268,6 +1290,7 @@
     "variantForetell": "Conjurar de Prever",
     "variantOverload": "Conjurar com Sobrecarregar",
     "variantBestow": "Conjurar com Conceder",
+    "variantFuse": "Conjurar com Fusão",
     "variantFallback": "Conjurar com {{type}}"
   },
   "categoryChoice": {
@@ -1436,6 +1459,9 @@
   "proliferate": {
     "proliferateTitle": "Proliferar",
     "proliferateSubtitle": "Escolha qualquer número de permanentes e jogadores com marcadores. Cada alvo escolhido recebe mais um marcador de cada tipo já presente.",
+    "timeTravelTitle": "Viagem no Tempo",
+    "timeTravelRemoveSubtitle": "Escolha qualquer número de objetos elegíveis para remover um marcador temporal.",
+    "timeTravelAddSubtitle": "Escolha qualquer número de objetos elegíveis restantes para adicionar um marcador temporal.",
     "chooseObjectsTitle": "Escolher Permanentes",
     "chooseObjectsSubtitle": "Escolha qualquer número de permanentes. Você paga um custo por cada um escolhido.",
     "selectAll": "Todos",

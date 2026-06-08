@@ -6,7 +6,7 @@ use serde::ser::SerializeStructVariant;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
-use super::card::PrintedCardRef;
+use super::card::{PrintedCardRef, TokenImageRef};
 use super::card_type::{CardType, CoreType, SubtypeSet, Supertype};
 use super::counter::{CounterMatch, CounterType};
 use super::events::BendingType;
@@ -23,6 +23,7 @@ use super::replacements::ReplacementEvent;
 use super::statics::{ActivationExemption, CastFrequency, StaticMode};
 use super::triggers::TriggerMode;
 use super::zones::Zone;
+use crate::game::game_object::DisplaySource;
 use crate::types::events::PlayerActionKind;
 
 // ---------------------------------------------------------------------------
@@ -1131,6 +1132,21 @@ pub enum ManaProduction {
     /// control, add one mana of that color." Mirrors the structure of
     /// `QuantityRef::DistinctColorsAmongPermanents`.
     DistinctColorsAmongPermanents { filter: TargetFilter },
+    /// CR 106.1 + CR 109.1: Produce N mana of one chosen color from the distinct
+    /// colors present among permanents matching `filter`. Mox Amber class:
+    /// "{T}: Add one mana of any color among legendary creatures and
+    /// planeswalkers you control." Colors resolve dynamically at activation
+    /// time; CR 106.5 applies when no matching permanent is colored.
+    AnyOneColorAmongPermanents {
+        #[serde(default = "default_quantity_one")]
+        count: QuantityExpr,
+        filter: TargetFilter,
+        #[serde(
+            default = "default_mana_contribution",
+            skip_serializing_if = "is_default_mana_contribution"
+        )]
+        contribution: ManaContribution,
+    },
     /// CR 603.7c + CR 106.3: Produce one mana of the same type as the mana
     /// produced by the triggering `ManaAdded` event. Used by `TapsForMana`
     /// triggers of the form "add one mana of any type that land produced"
@@ -1235,6 +1251,13 @@ impl<'de> serde::Deserialize<'de> for ManaProduction {
                     DistinctColorsAmongPermanents {
                         filter: TargetFilter,
                     },
+                    AnyOneColorAmongPermanents {
+                        #[serde(default = "default_quantity_one")]
+                        count: QuantityExpr,
+                        filter: TargetFilter,
+                        #[serde(default = "default_mana_contribution")]
+                        contribution: ManaContribution,
+                    },
                     TriggerEventManaType,
                 }
                 let helper: ManaProductionHelper =
@@ -1304,6 +1327,15 @@ impl<'de> serde::Deserialize<'de> for ManaProduction {
                     ManaProductionHelper::DistinctColorsAmongPermanents { filter } => {
                         ManaProduction::DistinctColorsAmongPermanents { filter }
                     }
+                    ManaProductionHelper::AnyOneColorAmongPermanents {
+                        count,
+                        filter,
+                        contribution,
+                    } => ManaProduction::AnyOneColorAmongPermanents {
+                        count,
+                        filter,
+                        contribution,
+                    },
                     ManaProductionHelper::TriggerEventManaType => {
                         ManaProduction::TriggerEventManaType
                     }
@@ -1702,13 +1734,17 @@ pub enum CastPermissionConstraint {
 /// and `RemainExiled` — the marker still arms the CR 608.2g timing bypass.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResolutionCastCleanup {
-    /// Cards exiled during the dig that were not the hit; they go to the
-    /// bottom of the library in a random order on resolution completion.
+    /// Cards exiled/revealed during the dig that were not the hit.
     /// Empty for Suspend's self-free-cast (no dig).
     pub exiled_misses: Vec<super::identifiers::ObjectId>,
     /// Where the hit goes if the player declines or the cast-time MV check
     /// rejects the cast.
     pub reject_action: ResolutionMvRejectAction,
+    /// What happens after the hit is successfully cast. Cascade/Discover bottom
+    /// their misses immediately; Ripple may need to offer additional same-named
+    /// cards from the same reveal first (CR 702.60a).
+    #[serde(default)]
+    pub success_action: ResolutionCastSuccessAction,
 }
 
 /// CR 608.2g: Disposition of a during-resolution card that is not cast.
@@ -1724,6 +1760,36 @@ pub enum ResolutionMvRejectAction {
     /// reached if a future during-resolution free cast adds a constraint. "If
     /// you don't [cast it], it remains exiled" — the card stays in exile.
     RemainExiled,
+}
+
+/// CR 608.2g: Follow-up after a during-resolution cast succeeds.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum ResolutionCastSuccessAction {
+    /// Cascade/Discover: cast hit is gone, so bottom the dig misses now.
+    #[default]
+    BottomMisses,
+    /// CR 702.60a: Ripple can cast any number of same-named revealed cards. Keep
+    /// offering the remaining hits before bottoming the non-hit revealed cards.
+    RippleOfferRemaining {
+        remaining_hits: Vec<super::identifiers::ObjectId>,
+    },
+    /// CR 608.2g + CR 601.2 + CR 202.3: Invoke Calamity's free-cast window — after
+    /// a spell cast this way resolves, re-open the window with the cast count
+    /// decremented and the running mana-value budget reduced by the spell's
+    /// resulting mana value, until the count hits zero or the controller
+    /// declines. Carries the window's parameters so the candidate set can be
+    /// recomputed from the controller's current graveyard/hand.
+    FreeCastOfferRemaining {
+        controller: PlayerId,
+        remaining_casts: u8,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        remaining_mv_budget: Option<u32>,
+        filter: TargetFilter,
+        zones: Vec<Zone>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        exile_instead_of_graveyard: bool,
+    },
 }
 
 /// When a delayed triggered ability fires (CR 603.7).
@@ -2306,6 +2372,10 @@ pub enum FilterProp {
     /// "historic card" subjects, mirroring `FilterProp::Modified` for
     /// CR 700.9's "modified" predicate.
     Historic,
+    /// CR 700.6: Matches objects that are not historic (negation of `Historic`).
+    /// Used for "nonhistoric" / "not historic" in compound type phrases such as
+    /// Desynchronization's "nonland, nonhistoric permanent".
+    NotHistoric,
     /// Matches objects whose name differs from all objects matching the inner filter
     /// that the evaluating controller controls on the battlefield.
     /// Used for "with a different name than each [type] you control" (e.g. Light-Paws).
@@ -4365,6 +4435,11 @@ pub enum ParsedCondition {
         zone: crate::types::zones::Zone,
         count: usize,
     },
+    ZoneCoreTypeCardCountAtLeast {
+        zone: crate::types::zones::Zone,
+        core_type: CoreType,
+        count: usize,
+    },
     ZoneSubtypeCardCountAtLeast {
         zone: crate::types::zones::Zone,
         subtype: String,
@@ -4968,7 +5043,11 @@ impl AbilityCost {
         match self {
             AbilityCost::Mana { .. }
             | AbilityCost::PayLife { .. }
-            | AbilityCost::Sacrifice { .. } => true,
+            | AbilityCost::Sacrifice { .. }
+            // CR 702.24a + CR 118.12: Discard's per-counter-scaled count is
+            // folded by `expand_per_counter` and paid by the `remaining`
+            // re-prompt loop in `handle_unless_payment` end-to-end.
+            | AbilityCost::Discard { .. } => true,
             // CR 118.12a: OneOf at the base must be a disjunction of mana
             // costs; mixed-shape disjunctions are not yet expanded into a
             // payable per-counter form.
@@ -5902,7 +5981,10 @@ pub enum Effect {
         /// Kept-card destination override (None = Hand).
         #[serde(default)]
         destination: Option<Zone>,
-        /// How many cards to keep (None = 1).
+        /// How many cards to keep. `None` is the default single keep unless the
+        /// Dig is in all-seen reorder mode. Parser-generated unbounded "all" /
+        /// "any number" continuations use `u32::MAX`, clamped by the resolver
+        /// to the number of seen cards.
         #[serde(default)]
         keep_count: Option<u32>,
         /// True = select 0..=keep_count ("up to N"), false = exactly keep_count.
@@ -5917,6 +5999,10 @@ pub enum Effect {
         /// CR 701.20a vs CR 701.16a: True = cards are revealed (public), false = looked at (private).
         #[serde(default)]
         reveal: bool,
+        /// CR 614.1 / CR 110.5b: Kept cards routed to the battlefield enter
+        /// tapped when true (Planar Genesis — "onto the battlefield tapped").
+        #[serde(default)]
+        enter_tapped: bool,
     },
     GainControl {
         #[serde(default = "default_target_filter_any")]
@@ -6141,6 +6227,16 @@ pub enum Effect {
         /// sibling copy effect.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         copier: Option<ControllerRef>,
+    },
+    /// CR 702.50a + CR 707.10: Epic's recurring upkeep copy. Carries a snapshot
+    /// of the Epic spell's resolved ability captured when the Epic spell
+    /// resolved; resolving this effect puts a copy of that spell (minus its epic
+    /// ability) onto the stack under the controller. Created by
+    /// `game::effects::epic::arm_epic` as the body of a recurring delayed
+    /// triggered ability, so it fires at the beginning of each of the
+    /// controller's upkeeps for the rest of the game.
+    EpicCopy {
+        spell: Box<ResolvedAbility>,
     },
     /// CR 707.12: Create a copy of a card/object in its zone and cast that
     /// copy while the resolving spell or ability continues resolving.
@@ -6817,6 +6913,44 @@ pub enum Effect {
         #[serde(default, skip_serializing_if = "CastFromZoneDriver::is_default")]
         driver: CastFromZoneDriver,
     },
+    /// CR 608.2g + CR 601.2 + CR 118.9: Open an interactive "free-cast window"
+    /// during this spell/ability's resolution: the controller may cast up to
+    /// `count` spells matching `filter` from any of `zones` (their own
+    /// graveyard and/or hand), each without paying its mana cost, casting them
+    /// one at a time during resolution (CR 608.2g — "casting other spells this
+    /// way"). When `max_total_mv` is `Some(n)`, the *running total* mana value
+    /// of the spells cast this way must not exceed `n` (CR 202.3) — a
+    /// cross-selection budget that shrinks as each spell is cast. "Up to N"
+    /// makes every cast optional (the controller may stop early or cast none).
+    ///
+    /// When `exile_instead_of_graveyard` is true, each spell cast this way
+    /// carries the rider "if those spells would be put into your graveyard,
+    /// exile them instead" (CR 614.1a) for the rest of the cast — applied as a
+    /// duration-scoped replacement on the cast spell.
+    ///
+    /// Distinct from `CastFromZone`, which grants a casting *permission* on a
+    /// targeted object (lingering or a single self-cast). This effect owns the
+    /// interactive multi-cast selection loop with the shared MV budget — there
+    /// is no target slot; candidates are gathered by `filter` across `zones` at
+    /// resolution time. Invoke Calamity is the type specimen.
+    FreeCastFromZones {
+        /// CR 601.2: Maximum number of spells the controller may cast this way.
+        count: u8,
+        /// CR 202.3: Optional running-total mana-value budget shared across all
+        /// spells cast this way. `None` means no MV cap.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_total_mv: Option<u32>,
+        /// CR 601.2a: Filter the candidate cards must match (e.g. instant
+        /// and/or sorcery).
+        filter: TargetFilter,
+        /// CR 601.2a: Zones searched for candidates (the controller's own
+        /// graveyard and/or hand).
+        zones: Vec<Zone>,
+        /// CR 614.1a: When true, spells cast this way are exiled instead of
+        /// being put into their owner's graveyard ("exile them instead").
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        exile_instead_of_graveyard: bool,
+    },
     /// CR 615: Prevent damage to a target.
     PreventDamage {
         amount: PreventionAmount,
@@ -7149,6 +7283,13 @@ pub enum Effect {
     /// time (the cascade spell is on the stack when cascade resolves per CR 702.85a),
     /// so no threshold parameter is stored on the variant itself.
     Cascade,
+    /// CR 702.60a: Ripple N — when you cast this spell, reveal the top N cards of
+    /// your library; you may cast any with the same name as this spell without
+    /// paying their mana cost, then put the rest on the bottom.
+    /// The source spell's name is read from `ability.source_id` at resolve time.
+    Ripple {
+        count: u32,
+    },
     /// CR 702.94a: Miracle trigger resolution — offers the player the chance to
     /// cast the source card from hand for its miracle cost. Carries the cost so
     /// the resolution handler can populate `WaitingFor::CastOffer` (Miracle).
@@ -7382,7 +7523,7 @@ pub enum Effect {
     },
     /// CR 701.48a: Learn — you may discard a card to draw a card, or get a Lesson from outside the game.
     Learn,
-    /// CR 702.166a: Forage — exile three cards from your graveyard or sacrifice a Food.
+    /// CR 701.61a: Forage — exile three cards from your graveyard or sacrifice a Food.
     Forage,
     /// CR 702.163a: Collect evidence N — exile cards with total mana value N or more from graveyard.
     CollectEvidence {
@@ -7465,6 +7606,19 @@ pub enum Effect {
     Conjure {
         /// One or more (card_name, count) pairs for multi-card conjure patterns.
         cards: Vec<ConjureCard>,
+        destination: Zone,
+        #[serde(default)]
+        tapped: bool,
+    },
+    /// Digital-only Alchemy keyword action (no CR entry): "draft a card from
+    /// [this card]'s spellbook" — reveal the source card's fixed spellbook list,
+    /// the controller chooses one card name from it, and that card is conjured
+    /// into `destination` (mirrors `Conjure`, but the controller picks one entry
+    /// from a per-card list). The list is not in the Oracle text; it is carried
+    /// on the source object (`GameObject::spellbook`, from
+    /// `CardFace::metadata.spellbook`), so the resolver reads it from the source.
+    /// An empty list resolves as a no-op.
+    DraftFromSpellbook {
         destination: Zone,
         #[serde(default)]
         tapped: bool,
@@ -8331,10 +8485,14 @@ impl Effect {
             | Effect::RevealUntil { .. }
             | Effect::Discover { .. }
             | Effect::Cascade
+            | Effect::Ripple { .. }
             | Effect::MiracleCast { .. }
             | Effect::MadnessCast { .. }
             | Effect::GiftDelivery { .. }
             | Effect::ExchangeControl { .. }
+            // CR 601.2a: candidates gathered by `filter`/`zones` at resolution,
+            // no player-selectable target slot.
+            | Effect::FreeCastFromZones { .. }
             | Effect::Manifest { .. }
             | Effect::ManifestDread
             | Effect::RollDie { .. }
@@ -8369,6 +8527,7 @@ impl Effect {
             | Effect::TimeTravel
             | Effect::RuntimeHandled { .. }
             | Effect::Conjure { .. }
+            | Effect::DraftFromSpellbook { .. }
             | Effect::ChooseOneOf { .. }
             | Effect::Unimplemented { .. }
             // CR 603.7e: ChooseObjectsIntoTrackedSet has no discrete effect-target
@@ -8388,6 +8547,9 @@ impl Effect {
             // (`collect_target_slots` / `collect_target_slot_specs`), mirroring
             // `MoveCounters`/`Attach`; all other forms host on the controller or
             // source and declare no target.
+            // CR 702.50a: EpicCopy carries its targets inside the snapshotted
+            // spell ability, not in a top-level `target` field.
+            | Effect::EpicCopy { .. }
             | Effect::CreateDamageReplacement { .. } => None,
             // CR 701.23a: SearchLibrary has an optional player target for opponent search.
             Effect::SearchLibrary { target_player, .. } => target_player.as_ref(),
@@ -8454,6 +8616,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::SeparateIntoPiles { .. } => "SeparateIntoPiles",
         Effect::SwitchPT { .. } => "SwitchPT",
         Effect::CopySpell { .. } => "CopySpell",
+        Effect::EpicCopy { .. } => "EpicCopy",
         Effect::CastCopyOfCard { .. } => "CastCopyOfCard",
         Effect::CopyTokenOf { .. } => "CopyTokenOf",
         Effect::Myriad => "Myriad",
@@ -8507,6 +8670,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::CreateEmblem { .. } => "CreateEmblem",
         Effect::PayCost { .. } => "PayCost",
         Effect::CastFromZone { .. } => "CastFromZone",
+        Effect::FreeCastFromZones { .. } => "FreeCastFromZones",
         Effect::PreventDamage { .. } => "PreventDamage",
         Effect::CreateDamageReplacement { .. } => "CreateDamageReplacement",
         Effect::LoseTheGame { .. } => "LoseTheGame",
@@ -8534,6 +8698,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::RevealUntil { .. } => "RevealUntil",
         Effect::Discover { .. } => "Discover",
         Effect::Cascade => "Cascade",
+        Effect::Ripple { .. } => "Ripple",
         Effect::MiracleCast { .. } => "MiracleCast",
         Effect::MadnessCast { .. } => "MadnessCast",
         Effect::PutAtLibraryPosition { .. } => "PutAtLibraryPosition",
@@ -8575,6 +8740,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::GiveControl { .. } => "GiveControl",
         Effect::RemoveFromCombat { .. } => "RemoveFromCombat",
         Effect::Conjure { .. } => "Conjure",
+        Effect::DraftFromSpellbook { .. } => "DraftFromSpellbook",
         Effect::ChooseOneOf { .. } => "ChooseOneOf",
         Effect::Unimplemented { name, .. } => name,
     }
@@ -8647,6 +8813,7 @@ pub enum EffectKind {
     SeparateIntoPiles,
     SwitchPT,
     CopySpell,
+    EpicCopy,
     CastCopyOfCard,
     CopyTokenOf,
     Myriad,
@@ -8696,6 +8863,7 @@ pub enum EffectKind {
     CreateEmblem,
     PayCost,
     CastFromZone,
+    FreeCastFromZones,
     PreventDamage,
     CreateDamageReplacement,
     Regenerate,
@@ -8724,6 +8892,7 @@ pub enum EffectKind {
     RevealUntil,
     Discover,
     Cascade,
+    Ripple,
     MiracleCast,
     MadnessCast,
     PutAtLibraryPosition,
@@ -8763,6 +8932,7 @@ pub enum EffectKind {
     GiveControl,
     RemoveFromCombat,
     Conjure,
+    DraftFromSpellbook,
     ChooseOneOf,
     Unimplemented,
     /// Engine-level equip action (not via an Effect handler).
@@ -8837,6 +9007,7 @@ impl From<&Effect> for EffectKind {
             Effect::SeparateIntoPiles { .. } => EffectKind::SeparateIntoPiles,
             Effect::SwitchPT { .. } => EffectKind::SwitchPT,
             Effect::CopySpell { .. } => EffectKind::CopySpell,
+            Effect::EpicCopy { .. } => EffectKind::EpicCopy,
             Effect::CastCopyOfCard { .. } => EffectKind::CastCopyOfCard,
             Effect::CopyTokenOf { .. } => EffectKind::CopyTokenOf,
             Effect::Myriad => EffectKind::Myriad,
@@ -8892,6 +9063,7 @@ impl From<&Effect> for EffectKind {
             Effect::CreateEmblem { .. } => EffectKind::CreateEmblem,
             Effect::PayCost { .. } => EffectKind::PayCost,
             Effect::CastFromZone { .. } => EffectKind::CastFromZone,
+            Effect::FreeCastFromZones { .. } => EffectKind::FreeCastFromZones,
             Effect::PreventDamage { .. } => EffectKind::PreventDamage,
             Effect::CreateDamageReplacement { .. } => EffectKind::CreateDamageReplacement,
             Effect::LoseTheGame { .. } => EffectKind::LoseTheGame,
@@ -8919,6 +9091,7 @@ impl From<&Effect> for EffectKind {
             Effect::RevealUntil { .. } => EffectKind::RevealUntil,
             Effect::Discover { .. } => EffectKind::Discover,
             Effect::Cascade => EffectKind::Cascade,
+            Effect::Ripple { .. } => EffectKind::Ripple,
             Effect::MiracleCast { .. } => EffectKind::MiracleCast,
             Effect::MadnessCast { .. } => EffectKind::MadnessCast,
             Effect::PutAtLibraryPosition { .. } => EffectKind::PutAtLibraryPosition,
@@ -8960,6 +9133,7 @@ impl From<&Effect> for EffectKind {
             Effect::GiveControl { .. } => EffectKind::GiveControl,
             Effect::RemoveFromCombat { .. } => EffectKind::RemoveFromCombat,
             Effect::Conjure { .. } => EffectKind::Conjure,
+            Effect::DraftFromSpellbook { .. } => EffectKind::DraftFromSpellbook,
             Effect::ChooseOneOf { .. } => EffectKind::ChooseOneOf,
             Effect::Unimplemented { .. } => EffectKind::Unimplemented,
         }
@@ -9932,6 +10106,12 @@ pub enum AbilityCondition {
         card_type: CoreType,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         additional_filter: Option<FilterProp>,
+        /// CR 205.3m: Optional subtype constraint on the revealed card (e.g.
+        /// Kenessos: "If it's a Kraken, Leviathan, Octopus, or Serpent
+        /// creature card"). Evaluated against `last_revealed_ids` alongside
+        /// `card_type`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        subtype_filter: Option<Box<TargetFilter>>,
     },
     /// CR 400.7 + CR 608.2c: True when the source permanent entered the battlefield
     /// this turn. For the "did not enter this turn" sense (e.g., Moon-Circuit Hacker
@@ -11924,14 +12104,31 @@ pub struct CopiableValues {
 pub enum ContinuousModification {
     CopyValues {
         values: Box<CopiableValues>,
-        /// Display-identity pointer of the copy source (oracle id + displayed
-        /// face name). NOT a CR 707.2 copiable characteristic — it carries no
-        /// rules weight and is deliberately kept off `CopiableValues`. It rides
-        /// on the modification so the copy's art is applied (and reverts) through
-        /// the same layer pass as the copied characteristics. `None` when the
-        /// source is a true token with no printed identity.
+        /// Image-routing identity of the copy source, carried so the copy renders
+        /// the source's art and reverts through the same layer pass as the copied
+        /// characteristics. NONE of these three are CR 707.2 copiable values
+        /// (status/art are not copied per CR 707.2) — they are display routing
+        /// only, deliberately kept off `CopiableValues`, and mirror the flat
+        /// `GameObject`/`CopyTokenSpec` storage (`display_source` discriminates:
+        /// `Card` ⇒ read `printed_ref`; `Token` ⇒ read `token_image_ref`).
+        ///
+        /// CR 111.1 + CR 707.2: a permanent that becomes a copy of a *token*
+        /// stays a nontoken (token-ness is created by a token-making effect per
+        /// CR 111.1, and is not among the CR 707.2 copiable values), but its name
+        /// is the token's, which only resolves in the token art database — so the
+        /// source's `display_source = Token` and `token_image_ref` must ride
+        /// along, not just `printed_ref`.
+        #[serde(default)]
+        display_source: DisplaySource,
+        /// Scryfall oracle-id pointer of the source when it is a printed card.
+        /// `None` when the source is a true token (then `token_image_ref` carries
+        /// the routing).
         #[serde(default)]
         printed_ref: Option<PrintedCardRef>,
+        /// Exact token-art pointer of the source when it is a true token.
+        /// `None` for printed-card sources.
+        #[serde(default)]
+        token_image_ref: Option<TokenImageRef>,
     },
     /// CR 707.9 + CR 707.2: Override the copy's name after `CopyValues` applies.
     /// Used by "enter as a copy, except its name is X" (e.g., Superior Spider-Man's
@@ -12994,7 +13191,7 @@ mod tests {
             ],
         }
         .supports_cumulative_upkeep_payment());
-        assert!(!AbilityCost::Discard {
+        assert!(AbilityCost::Discard {
             count: QuantityExpr::Fixed { value: 1 },
             filter: None,
             random: false,
