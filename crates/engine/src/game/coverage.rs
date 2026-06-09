@@ -10009,14 +10009,14 @@ mod tests {
 
     #[test]
     fn unsupported_cumulative_upkeep_cost_counts_as_keyword_gap() {
-        // CR 702.24a: Exile-base cumulative upkeep is still unsupported by the
-        // unless-payment pipeline (Discard became supported once the per-counter
-        // discard payment chain landed), so it remains a coverage gap.
+        // CR 702.24a: arbitrary exile-base cumulative upkeep still needs
+        // interactive object selection before it can enter the unless-payment
+        // pipeline. Thought Lash-style top-library exile is covered separately.
         let mut face = make_face();
         face.keywords
             .push(Keyword::CumulativeUpkeep(AbilityCost::Exile {
                 count: 1,
-                zone: None,
+                zone: Some(Zone::Graveyard),
                 filter: None,
             }));
 
@@ -10031,6 +10031,26 @@ mod tests {
             .find(|item| item.category == ParseCategory::Keyword)
             .expect("keyword parse item");
         assert!(!keyword.supported);
+    }
+
+    #[test]
+    fn top_library_exile_cumulative_upkeep_has_no_keyword_gap() {
+        let mut face = make_face();
+        face.keywords
+            .push(Keyword::CumulativeUpkeep(AbilityCost::Exile {
+                count: 1,
+                zone: Some(Zone::Library),
+                filter: None,
+            }));
+
+        assert!(card_face_gaps(&face).is_empty());
+
+        let parse_details = build_parse_details_for_face(&face);
+        let keyword = parse_details
+            .iter()
+            .find(|item| item.category == ParseCategory::Keyword)
+            .expect("keyword parse item");
+        assert!(keyword.supported);
     }
 
     #[test]

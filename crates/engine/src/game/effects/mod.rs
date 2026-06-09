@@ -19,6 +19,7 @@ use crate::types::game_state::{
 use crate::types::identifiers::{ObjectId, TrackedSetId};
 use crate::types::mana::ManaCost;
 use crate::types::player::{Player, PlayerId};
+use crate::types::zones::Zone;
 
 pub mod adapt;
 pub mod add_restriction;
@@ -5673,6 +5674,17 @@ fn expand_per_counter(base: &AbilityCost, n: u32) -> AbilityCost {
             random: *random,
             self_ref: *self_ref,
         },
+        // CR 702.24a: Thought Lash-style cumulative upkeep scales the number
+        // of top-library cards exiled by the number of age counters.
+        AbilityCost::Exile {
+            count,
+            zone: Some(Zone::Library),
+            filter: None,
+        } => AbilityCost::Exile {
+            count: count.saturating_mul(n),
+            zone: Some(Zone::Library),
+            filter: None,
+        },
         // YAGNI fallback: no current cumulative-upkeep card uses these
         // base variants. If a future mechanic does, the
         // Composite-of-N-copies expansion is semantically correct for
@@ -6869,6 +6881,26 @@ mod tests {
         assert_eq!(filter, Some(TargetFilter::SelfRef));
         assert!(!random);
         assert!(self_ref);
+    }
+
+    #[test]
+    fn expand_per_counter_top_library_exile_scales_count() {
+        let base = AbilityCost::Exile {
+            count: 1,
+            zone: Some(Zone::Library),
+            filter: None,
+        };
+
+        let expanded = expand_per_counter(&base, 3);
+
+        assert_eq!(
+            expanded,
+            AbilityCost::Exile {
+                count: 3,
+                zone: Some(Zone::Library),
+                filter: None,
+            }
+        );
     }
 
     #[test]

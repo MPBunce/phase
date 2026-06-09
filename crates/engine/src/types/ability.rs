@@ -5084,6 +5084,15 @@ impl AbilityCost {
             // folded by `expand_per_counter` and paid by the `remaining`
             // re-prompt loop in `handle_unless_payment` end-to-end.
             | AbilityCost::Discard { .. } => true,
+            // CR 702.24a: Thought Lash-style "exile the top card of your
+            // library" is payable as a deterministic top-library cost. Other
+            // exile costs still need interactive object selection and stay
+            // outside the cumulative-upkeep support boundary.
+            AbilityCost::Exile {
+                zone: Some(Zone::Library),
+                filter: None,
+                ..
+            } => true,
             // CR 118.12a: OneOf at the base must be a disjunction of mana
             // costs; mixed-shape disjunctions are not yet expanded into a
             // payable per-counter form.
@@ -13232,6 +13241,18 @@ mod tests {
             filter: None,
             random: false,
             self_ref: false,
+        }
+        .supports_cumulative_upkeep_payment());
+        assert!(AbilityCost::Exile {
+            count: 1,
+            zone: Some(Zone::Library),
+            filter: None,
+        }
+        .supports_cumulative_upkeep_payment());
+        assert!(!AbilityCost::Exile {
+            count: 1,
+            zone: Some(Zone::Graveyard),
+            filter: None,
         }
         .supports_cumulative_upkeep_payment());
     }
