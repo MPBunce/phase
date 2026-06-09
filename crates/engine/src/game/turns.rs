@@ -1433,6 +1433,7 @@ pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> Waiti
         // trips through `GameAction::ChooseReplacement`; the drain resumes
         // via the `EmptyManaPool` arm of `handle_replacement_choice`.
         if state.pending_phase_transition_progress.is_some() {
+            state.deferred_step_trigger_resume = Some(state.phase);
             return state.waiting_for.clone();
         }
 

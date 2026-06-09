@@ -5930,6 +5930,15 @@ pub struct GameState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_phase_transition_progress: Option<PhaseTransitionProgress>,
 
+    /// Transient: set to the phase whose beginning-of-step triggers still need
+    /// to run when `auto_advance` returns early because
+    /// `pending_phase_transition_progress` is set (CR 616.1 mana-pool choice
+    /// deferred `enter_phase`). Cleared when `handle_replacement_choice`
+    /// resumes `auto_advance` after the drain completes so beginning-of-step
+    /// triggers (CR 513.1 + CR 603.3b) still fire.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deferred_step_trigger_resume: Option<Phase>,
+
     /// Transient: set by stack.rs before resolving a triggered ability, cleared after.
     /// Used by event-context TargetFilter variants to resolve trigger event data.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -6492,6 +6501,7 @@ impl GameState {
             pending_damage_replacements: Vec::new(),
             pending_step_end_mana_handlers: Vec::new(),
             pending_phase_transition_progress: None,
+            deferred_step_trigger_resume: None,
             current_trigger_event: None,
             current_trigger_match_count: None,
             resolving_stack_entry: None,

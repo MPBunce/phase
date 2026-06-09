@@ -83,6 +83,7 @@ mod integration_adventure;
 mod integration_bending;
 mod integration_landfall;
 mod invoke_calamity_free_cast;
+mod issue_1308_unstoppable_plan;
 mod issue_1509_sorcery_main_phase_cast;
 mod issue_1963_lotleth_troll;
 mod issue_1970_eladamri;
