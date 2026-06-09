@@ -453,7 +453,15 @@ pub fn resolved_targets(
     // don't accidentally inherit the parent's targets via the chain target
     // propagation in `effects::mod.rs::resolve_chain`.
     if matches!(target_filter, TargetFilter::SelfRef) {
-        return vec![TargetRef::Object(ability.source_id)];
+        // CR 400.7: The self-reference resolves to the source only while it is
+        // still the same object. A source that left and re-entered the
+        // battlefield (blink/flicker) since the ability was created is a new
+        // object (higher incarnation), so the self-reference finds nothing.
+        return if ability.source_is_current(state) {
+            vec![TargetRef::Object(ability.source_id)]
+        } else {
+            Vec::new()
+        };
     }
     if matches!(target_filter, TargetFilter::SourceOrPaired) {
         return state
@@ -507,7 +515,13 @@ pub(crate) fn resolved_object_ids_for_filter(
     filter: &TargetFilter,
 ) -> Vec<ObjectId> {
     match filter {
-        TargetFilter::SelfRef => vec![ability.source_id],
+        // CR 400.7: self-reference resolves only while the source is the same
+        // object; a blinked-and-returned source (higher incarnation) finds nothing.
+        TargetFilter::SelfRef => ability
+            .source_is_current(state)
+            .then_some(ability.source_id)
+            .into_iter()
+            .collect(),
         TargetFilter::ParentTarget => object_targets(&ability.targets).collect(),
         TargetFilter::ParentTargetSlot { index } => ability
             .targets
@@ -875,6 +889,11 @@ pub(crate) fn extract_player_from_event(
             TargetRef::Player(pid) => Some(*pid),
             TargetRef::Object(oid) => state.objects.get(oid).map(|obj| obj.controller),
         },
+        // CR 120.1 + CR 510.2: Combat damage to a player binds `TriggeringPlayer`
+        // / "that player" to the damaged player. Rev, Tithe Extractor's exile-top
+        // effect must read the damaged opponent's library, not the ability
+        // controller's.
+        GameEvent::CombatDamageDealtToPlayer { player_id, .. } => Some(*player_id),
         // CR 500.2 + CR 603.7c: Phase-change triggers like "at the beginning of
         // each player's upkeep" bind "that player" / `TriggeringPlayer` to the
         // active player — the player whose phase is currently beginning.
@@ -1583,6 +1602,17 @@ mod tests {
             total_damage: 7,
         };
         assert_eq!(extract_amount_from_event(&event), Some(7));
+    }
+
+    #[test]
+    fn extract_player_from_combat_damage_dealt_to_player_returns_damaged_player() {
+        let (state, _c0, _c1) = setup_with_creatures();
+        let event = GameEvent::CombatDamageDealtToPlayer {
+            player_id: PlayerId(1),
+            source_amounts: vec![(ObjectId(1), 3)],
+            total_damage: 3,
+        };
+        assert_eq!(extract_player_from_event(&event, &state), Some(PlayerId(1)));
     }
 
     fn setup_with_creatures() -> (GameState, ObjectId, ObjectId) {
