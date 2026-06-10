@@ -6,6 +6,8 @@ use crate::types::ability::{
     ModalChoice, PlayerFilter, QuantityExpr, RenownSubject, ResolvedAbility, TargetFilter,
     TargetRef, TributeOutcome, TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter,
 };
+#[cfg(test)]
+use crate::types::ability::{EffectScope, TapStateChange};
 use crate::types::card_type::CoreType;
 use crate::types::events::{GameEvent, ManaTapState};
 use crate::types::game_state::{
@@ -2823,7 +2825,7 @@ fn build_next_order_triggers_prompt(
 
 /// CR 603.3b: Validate `order` is a permutation of `0..len`. Returns true if
 /// `order` has the right length, no duplicates, and every index is in range.
-fn is_valid_permutation(order: &[usize], len: usize) -> bool {
+pub(crate) fn is_valid_permutation(order: &[usize], len: usize) -> bool {
     if order.len() != len {
         return false;
     }
@@ -4163,9 +4165,11 @@ pub(crate) fn check_trigger_condition(
         }
         // CR 719.2: True when the source Case is unsolved and its solve condition is met.
         TriggerCondition::SolveConditionMet => source_id
-            .and_then(|id| state.objects.get(&id))
-            .and_then(|obj| obj.case_state.as_ref())
-            .is_some_and(|cs| !cs.is_solved && evaluate_solve_condition(state, cs, controller)),
+            .and_then(|id| state.objects.get(&id).map(|obj| (id, obj)))
+            .and_then(|(id, obj)| obj.case_state.as_ref().map(|cs| (id, cs)))
+            .is_some_and(|(id, cs)| {
+                !cs.is_solved && evaluate_solve_condition(state, cs, controller, id)
+            }),
         // CR 716.2a: True when the source Class is at or above the specified level.
         TriggerCondition::ClassLevelGE { level } => {
             source_id.is_some_and(|id| eval_class_level_ge(state, id, *level))
@@ -4848,6 +4852,7 @@ fn evaluate_solve_condition(
     state: &GameState,
     cs: &crate::game::game_object::CaseState,
     controller: PlayerId,
+    source_id: ObjectId,
 ) -> bool {
     use crate::types::ability::SolveCondition;
 
@@ -4873,6 +4878,12 @@ fn evaluate_solve_condition(
                 })
                 .count() as i32;
             comparator.evaluate(count, *threshold as i32)
+        }
+        // CR 719.3a: A general game-state solve condition is evaluated at the
+        // controller's end step through the single condition
+        // evaluator that powers intervening-ifs and static abilities.
+        SolveCondition::Condition { condition } => {
+            crate::game::layers::evaluate_condition(state, condition, controller, source_id)
         }
         SolveCondition::Text { .. } => false, // Undecomposed conditions never auto-solve
     }
@@ -11565,8 +11576,8 @@ pub mod tests {
             Zone::Battlefield,
             ObjectId(0xA1A1), // self-sourced
             None,
-            true,  // enter_transformed
-            false, // effect_enter_tapped
+            true, // enter_transformed
+            crate::types::zones::EtbTapState::Unspecified,
             None,  // controller_override
             &[],   // effect_enter_with_counters
             None,  // face_down_profile
@@ -16380,6 +16391,8 @@ pub mod tests {
                 object_id: spell_id,
                 card_id: spell_card_id,
                 targets: vec![],
+
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             })
             .expect("casting Sowing Mycospawn must be accepted");
 
@@ -16405,6 +16418,8 @@ pub mod tests {
                 object_id: spell_id,
                 card_id: spell_card_id,
                 targets: vec![],
+
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             })
             .expect("casting Sowing Mycospawn must be accepted");
 
@@ -16532,6 +16547,8 @@ pub mod tests {
                 object_id: spell_id,
                 card_id: spell_card_id,
                 targets: vec![],
+
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             })
             .expect("casting Goblin Bushwhacker must be accepted");
 
@@ -16571,6 +16588,8 @@ pub mod tests {
                 object_id: spell_id,
                 card_id: spell_card_id,
                 targets: vec![],
+
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             })
             .expect("casting Goblin Bushwhacker must be accepted");
 
@@ -17057,10 +17076,12 @@ pub mod tests {
             ))
             .execute(AbilityDefinition::new(
                 AbilityKind::Database,
-                Effect::Tap {
+                Effect::SetTapState {
                     target: TargetFilter::Typed(
                         TypedFilter::default().with_type(TypeFilter::Creature),
                     ),
+                    scope: EffectScope::Single,
+                    state: TapStateChange::Tap,
                 },
             ));
         {
@@ -18061,7 +18082,13 @@ pub mod tests {
         match crate::game::replacement::replace_event(state, proposed, events) {
             crate::game::replacement::ReplacementResult::Execute(event) => {
                 crate::game::effects::change_zone::deliver_replaced_zone_change(
-                    state, event, None, None, false, events,
+                    state,
+                    event,
+                    None,
+                    None,
+                    false,
+                    crate::types::game_state::PostReplacementDrainOwner::DeliveryTail,
+                    events,
                 );
             }
             crate::game::replacement::ReplacementResult::Prevented => {}
@@ -20818,8 +20845,10 @@ mod dedup_regression_tests {
         };
 
         let ability = ResolvedAbility::new(
-            Effect::Tap {
+            Effect::SetTapState {
                 target: TargetFilter::TriggeringSource,
+                scope: EffectScope::Single,
+                state: TapStateChange::Tap,
             },
             Vec::new(),
             ObjectId(0),
