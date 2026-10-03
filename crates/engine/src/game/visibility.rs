@@ -3550,6 +3550,15 @@ fn redact_hidden_zone_change_event(event: &mut GameEvent, hidden_ids: &HashSet<O
 /// - the turn's entry, sacrifice, damage and attack-declaration ledgers keep every record
 ///   (counts are preserved) with the hidden object's identifying fields blanked.
 ///
+/// Accepted limitation: the battlefield-entry, sacrifice and damage ledgers are blanked
+/// projection-wide, including the characteristic columns (`core_types`, mana value) their
+/// cost and condition readers filter on. A derived view computed on the projected state
+/// (`derive_views`, e.g. a displayed cost reduced by "a creature entered under your
+/// control this turn") can therefore differ from the authoritative value when the only
+/// matching record names a hidden id. The divergence is limited to DISPLAY-only derived
+/// views over a hidden-id record; rules decisions read authoritative state. This follows
+/// the accepted `zone_changes_this_turn` / `redact_zone_change_record` precedent.
+///
 /// Projection only: authoritative state keeps the full records the engine reads for
 /// look-back (CR 608.2h, CR 603.10a).
 fn redact_hidden_identity_side_tables(state: &mut GameState, hidden_ids: &HashSet<ObjectId>) {

@@ -802,6 +802,77 @@ fn hideaway_source_leaving_blanks_hidden_linked_exile_member() {
     assert_eq!(mv(members, lapse), Some(2), "public member keeps its mv");
 }
 
+/// Test F3: a Hideaway source bounced to its owner's hand (Capsize) while its
+/// face-down exiled card stays hidden. The source's own id is now hidden, so
+/// its `linked_exile_lki` entry is dropped from the hidden-id projection.
+#[test]
+fn hideaway_source_bounced_to_hand_drops_linked_exile_entry() {
+    let Some(db) = load_db() else {
+        return;
+    };
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let windbrisk = scenario.add_real_card(P0, "Windbrisk Heights", Zone::Hand, db);
+    let shock = scenario.add_real_card(P0, "Shock", Zone::Library, db);
+    let capsize = scenario.add_real_card(P0, "Capsize", Zone::Hand, db);
+    let mut runner = scenario.build();
+    engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
+    let windbrisk_card_id = runner.state().objects[&windbrisk].card_id;
+
+    assert!(
+        play_windbrisk_and_hide(&mut runner, windbrisk, windbrisk_card_id, shock),
+        "reach-guard: the real Hideaway ETB surfaced a DigChoice"
+    );
+    fund(&mut runner, P0, &[(ManaType::Blue, 3)]);
+    runner.cast(capsize).target_objects(&[windbrisk]).resolve();
+
+    let raw = runner.state().clone();
+    assert_eq!(
+        raw.objects[&windbrisk].zone,
+        Zone::Hand,
+        "reach-guard: source bounced"
+    );
+    assert_eq!(raw.objects[&shock].zone, Zone::Exile, "reach-guard");
+    assert!(
+        raw.objects[&shock].face_down,
+        "reach-guard: hidden face down"
+    );
+    let raw_members = raw
+        .linked_exile_lki
+        .get(&windbrisk)
+        .expect("reach-guard: Windbrisk's bounce wrote linked_exile_lki");
+    assert_eq!(
+        raw_members
+            .iter()
+            .find(|m| m.exiled_id == shock)
+            .map(|m| m.mana_value),
+        Some(1),
+        "reach-guard: the hidden member is recorded with Shock's mv"
+    );
+
+    for (label, view) in [
+        ("P1", filter_state_for_viewer(&raw, P1)),
+        ("spectator", filter_state_for_unseated_viewer(&raw)),
+    ] {
+        assert_eq!(
+            view.objects[&windbrisk].name, HIDDEN,
+            "reach-guard ({label}): the source is hidden"
+        );
+        assert!(
+            !view.linked_exile_lki.contains_key(&windbrisk),
+            "{label}: linked_exile_lki still keyed by the hidden source"
+        );
+    }
+
+    // Over-redaction guard: the owner sees their own hand card, so its entry stays.
+    let p0 = filter_state_for_viewer(&raw, P0);
+    assert_eq!(p0.objects[&windbrisk].name, "Windbrisk Heights");
+    assert!(
+        p0.linked_exile_lki.contains_key(&windbrisk),
+        "P0 owner: a visible source keeps its linked-exile entry"
+    );
+}
+
 /// Test F2: a damage source bounced to hand after dealing damage.
 #[test]
 fn damage_source_bounced_to_hand_blanks_damage_record_source() {
