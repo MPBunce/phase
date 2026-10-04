@@ -19,15 +19,18 @@
 
 use engine::game::casting::display_spell_cost;
 use engine::game::combat::AttackTarget;
-use engine::game::derived_views::derive_views;
+use engine::game::derived_views::{derive_views, ClientGameStateRef};
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::game::visibility::{filter_state_for_unseated_viewer, filter_state_for_viewer};
 use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
+use engine::types::counter::CounterType;
+use engine::types::events::GameEvent;
 use engine::types::game_state::{
-    CastPaymentMode, ExileLink, ExileLinkKind, GameState, PayCostKind, WaitingFor,
+    CastPaymentMode, CounterAddedRecord, ExileLink, ExileLinkKind, GameState,
+    ManaSpentSourceSnapshot, PayCostKind, StackEntryKind, WaitingFor, ZoneChangeRecord,
 };
 use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
@@ -88,6 +91,12 @@ fn commit_cast(runner: &mut GameRunner, spell: ObjectId, target: Option<TargetRe
                 runner
                     .act(GameAction::PassPriority)
                     .expect("pool-funded remainder must pay");
+            }
+            // Capsize's Buyback is an optional additional cost; decline it.
+            WaitingFor::OptionalCostChoice { .. } => {
+                runner
+                    .act(GameAction::DecideOptionalCost { pay: false })
+                    .expect("declining an optional cost must be accepted");
             }
             other => panic!("unexpected waiting_for while committing cast: {other:?}"),
         }
@@ -1023,5 +1032,1080 @@ fn filtered_cast_history_keeps_type_filtered_cost_reduction() {
         display_spell_cost(&p0, P0, demilich),
         Some(two_blue),
         "filtered cast history must still count the hidden instant for Demilich"
+    );
+}
+
+fn counter_records_for(state: &GameState, id: ObjectId) -> Vec<CounterAddedRecord> {
+    state
+        .counter_added_this_turn
+        .iter()
+        .filter(|r| r.object_id == id)
+        .cloned()
+        .collect()
+}
+
+fn plus_one_counter_sum(state: &GameState) -> u32 {
+    state
+        .counter_added_this_turn
+        .iter()
+        .filter(|r| r.counter_type == CounterType::Plus1Plus1)
+        .map(|r| r.count)
+        .sum()
+}
+
+/// A hidden recipient's counter record loses every identifying column and keeps
+/// who put how many of which counter on which id (the counted columns).
+fn assert_counter_record_blanked(raw: &CounterAddedRecord, view: &CounterAddedRecord, label: &str) {
+    assert_eq!(
+        view.name, HIDDEN,
+        "{label}: the counter record still names the hidden recipient"
+    );
+    assert!(view.core_types.is_empty(), "{label}: core types kept");
+    assert!(view.subtypes.is_empty(), "{label}: subtypes kept");
+    assert!(view.supertypes.is_empty(), "{label}: supertypes kept");
+    assert!(view.keywords.is_empty(), "{label}: keywords kept");
+    assert!(view.colors.is_empty(), "{label}: colors kept");
+    assert!(view.counters.is_empty(), "{label}: counters kept");
+    assert_eq!(view.power, None, "{label}: power kept");
+    assert_eq!(view.toughness, None, "{label}: toughness kept");
+    assert_eq!(view.mana_value, 0, "{label}: mana value kept");
+    assert_eq!(
+        (
+            view.actor,
+            view.object_id,
+            &view.counter_type,
+            view.count,
+            view.controller,
+            view.owner
+        ),
+        (
+            raw.actor,
+            raw.object_id,
+            &raw.counter_type,
+            raw.count,
+            raw.controller,
+            raw.owner
+        ),
+        "{label}: the counted columns are preserved"
+    );
+}
+
+/// Test K1: CR 122.6 + CR 400.7: Battlegrowth's real counter writer records the
+/// Grizzly Bears, then Unsummon returns them to their owner's hand. The
+/// opponent and a spectator see the record kept but blanked; the owner, who
+/// sees their own hand, keeps it; a visible sibling (Llanowar Elves) keeps it.
+#[test]
+fn counter_ledger_blanks_recipient_bounced_to_hand() {
+    let Some(db) = load_db() else {
+        return;
+    };
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let bears = scenario.add_real_card(P0, "Grizzly Bears", Zone::Battlefield, db);
+    let elves = scenario.add_real_card(P0, "Llanowar Elves", Zone::Battlefield, db);
+    let growth_bears = scenario.add_real_card(P0, "Battlegrowth", Zone::Hand, db);
+    let growth_elves = scenario.add_real_card(P0, "Battlegrowth", Zone::Hand, db);
+    let unsummon = scenario.add_real_card(P0, "Unsummon", Zone::Hand, db);
+    let mut runner = scenario.build();
+    engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
+    fund(
+        &mut runner,
+        P0,
+        &[(ManaType::Green, 2), (ManaType::Blue, 1)],
+    );
+
+    commit_cast(&mut runner, growth_bears, Some(TargetRef::Object(bears)));
+    settle(&mut runner);
+    commit_cast(&mut runner, growth_elves, Some(TargetRef::Object(elves)));
+    settle(&mut runner);
+    commit_cast(&mut runner, unsummon, Some(TargetRef::Object(bears)));
+    settle(&mut runner);
+
+    let raw = runner.state().clone();
+    assert_eq!(raw.objects[&bears].zone, Zone::Hand, "reach-guard: bounced");
+    let raw_bears = counter_records_for(&raw, bears);
+    assert_eq!(
+        raw_bears.len(),
+        1,
+        "reach-guard: Battlegrowth's counter was recorded for the Bears"
+    );
+    let raw_record = &raw_bears[0];
+    assert_eq!(raw_record.name, "Grizzly Bears");
+    assert_eq!(raw_record.core_types, vec![CoreType::Creature]);
+    assert_eq!(raw_record.counter_type, CounterType::Plus1Plus1);
+    assert_eq!(raw_record.count, 1);
+    assert_eq!(raw_record.mana_value, 2);
+    let raw_elves = counter_records_for(&raw, elves);
+    assert_eq!(raw_elves.len(), 1, "reach-guard: the sibling's record");
+    assert_eq!(raw_elves[0].name, "Llanowar Elves");
+
+    for (label, view) in [
+        ("P1", filter_state_for_viewer(&raw, P1)),
+        ("spectator", filter_state_for_unseated_viewer(&raw)),
+    ] {
+        assert_eq!(
+            view.objects[&bears].name, HIDDEN,
+            "reach-guard ({label}): the recipient is hidden"
+        );
+        assert_eq!(
+            view.counter_added_this_turn.len(),
+            raw.counter_added_this_turn.len(),
+            "{label}: the ledger keeps every record"
+        );
+        let records = counter_records_for(&view, bears);
+        assert_eq!(records.len(), 1, "{label}: the hidden record is kept");
+        assert_counter_record_blanked(raw_record, &records[0], label);
+        assert_eq!(
+            view.objects[&elves].name, "Llanowar Elves",
+            "paired positive ({label}): the sibling is visible"
+        );
+        assert_eq!(
+            counter_records_for(&view, elves),
+            raw_elves,
+            "{label}: a visible recipient keeps every column"
+        );
+    }
+
+    let p0 = filter_state_for_viewer(&raw, P0);
+    assert_eq!(p0.objects[&bears].name, "Grizzly Bears");
+    assert_eq!(
+        counter_records_for(&p0, bears),
+        raw_bears,
+        "the owner sees their own hand card's counter record"
+    );
+    assert_eq!(
+        counter_records_for(runner.state(), bears)[0].name,
+        "Grizzly Bears",
+        "authoritative state is untouched by the projection"
+    );
+
+    // Re-entry: the recast Bears is public again and its record unredacted.
+    fund(&mut runner, P0, &[(ManaType::Green, 2)]);
+    runner.cast(bears).resolve();
+    let raw = runner.state().clone();
+    assert_eq!(raw.objects[&bears].zone, Zone::Battlefield, "reach-guard");
+    let p1 = filter_state_for_viewer(&raw, P1);
+    assert_eq!(
+        p1.objects[&bears].name, "Grizzly Bears",
+        "reach-guard: the recast permanent is public"
+    );
+    assert_eq!(
+        counter_records_for(&p1, bears),
+        counter_records_for(&raw, bears),
+        "a public recipient's counter record is not redacted"
+    );
+    assert_eq!(counter_records_for(&p1, bears)[0].name, "Grizzly Bears");
+}
+
+/// Test K2: CR 401.2: Time Ebb puts the countered-upon Bears on top of its
+/// owner's library, hidden from every viewer including the owner.
+#[test]
+fn counter_ledger_blanks_recipient_tucked_into_library_for_every_viewer() {
+    let Some(db) = load_db() else {
+        return;
+    };
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let bears = scenario.add_real_card(P0, "Grizzly Bears", Zone::Battlefield, db);
+    let growth = scenario.add_real_card(P0, "Battlegrowth", Zone::Hand, db);
+    let ebb = scenario.add_real_card(P0, "Time Ebb", Zone::Hand, db);
+    let mut runner = scenario.build();
+    engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
+    fund(
+        &mut runner,
+        P0,
+        &[(ManaType::Green, 1), (ManaType::Blue, 3)],
+    );
+
+    commit_cast(&mut runner, growth, Some(TargetRef::Object(bears)));
+    settle(&mut runner);
+    commit_cast(&mut runner, ebb, Some(TargetRef::Object(bears)));
+    settle(&mut runner);
+
+    let raw = runner.state().clone();
+    assert_eq!(raw.objects[&bears].zone, Zone::Library, "reach-guard");
+    assert_eq!(library_top(&raw, P0), Some(bears), "reach-guard: on top");
+    let raw_bears = counter_records_for(&raw, bears);
+    assert_eq!(raw_bears.len(), 1, "reach-guard: the counter was recorded");
+    assert_eq!(raw_bears[0].name, "Grizzly Bears");
+
+    for (label, view) in [
+        ("P1", filter_state_for_viewer(&raw, P1)),
+        ("P0 owner", filter_state_for_viewer(&raw, P0)),
+        ("spectator", filter_state_for_unseated_viewer(&raw)),
+    ] {
+        assert_eq!(view.objects[&bears].name, HIDDEN, "reach-guard ({label})");
+        assert_eq!(
+            view.counter_added_this_turn.len(),
+            raw.counter_added_this_turn.len(),
+            "{label}: the ledger keeps every record"
+        );
+        assert_eq!(
+            plus_one_counter_sum(&view),
+            plus_one_counter_sum(&raw),
+            "{label}: the +1/+1 counter count is preserved"
+        );
+        let records = counter_records_for(&view, bears);
+        assert_eq!(records.len(), 1, "{label}: the hidden record is kept");
+        assert_counter_record_blanked(&raw_bears[0], &records[0], label);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Payment-source snapshots (`mana_spent_source_snapshots`)
+// ---------------------------------------------------------------------------
+
+/// Tap each land for real mana (CR 605.3b: a mana ability resolves at once) and
+/// assert the pool holds exactly those lands' units.
+fn activate_lands(runner: &mut GameRunner, lands: &[ObjectId]) {
+    for &land in lands {
+        runner.activate(land, 0).resolve();
+    }
+    let mut sources: Vec<ObjectId> = runner
+        .state()
+        .players
+        .iter()
+        .find(|p| p.id == P0)
+        .expect("P0 exists")
+        .mana_pool
+        .mana
+        .iter()
+        .map(|unit| unit.source_id)
+        .collect();
+    sources.sort();
+    let mut expected = lands.to_vec();
+    expected.sort();
+    assert_eq!(
+        sources, expected,
+        "reach-guard: the pool holds one real unit from each land (not ObjectId(0))"
+    );
+}
+
+fn snapshot_of(
+    snapshots: &[ManaSpentSourceSnapshot],
+    source: ObjectId,
+) -> &ManaSpentSourceSnapshot {
+    snapshots
+        .iter()
+        .find(|s| s.source_id == source)
+        .unwrap_or_else(|| panic!("no payment snapshot for {source:?}: {snapshots:?}"))
+}
+
+/// Reach-guard / owner control: the vector is exactly {forest, island}, both named.
+fn assert_payment_names_both(
+    snapshots: &[ManaSpentSourceSnapshot],
+    forest: ObjectId,
+    island: ObjectId,
+    label: &str,
+) {
+    assert_eq!(snapshots.len(), 2, "{label}: one snapshot per paid unit");
+    assert_eq!(snapshot_of(snapshots, forest).lki.name, "Forest", "{label}");
+    let island_snapshot = snapshot_of(snapshots, island);
+    assert_eq!(island_snapshot.lki.name, "Island", "{label}");
+    assert!(
+        island_snapshot.lki.card_types.contains(&CoreType::Land),
+        "{label}: the island snapshot records its Land type"
+    );
+}
+
+/// The hidden source's entry keeps its id and slot and loses its identity; the
+/// visible source's entry is untouched; length and order are unchanged.
+fn assert_payment_redacted(
+    raw: &[ManaSpentSourceSnapshot],
+    view: &[ManaSpentSourceSnapshot],
+    hidden: ObjectId,
+    visible: ObjectId,
+    label: &str,
+) {
+    assert_eq!(view.len(), raw.len(), "{label}: payment vector length kept");
+    assert_eq!(
+        view.iter().map(|s| s.source_id).collect::<Vec<_>>(),
+        raw.iter().map(|s| s.source_id).collect::<Vec<_>>(),
+        "{label}: source ids and order kept"
+    );
+    let hidden_snapshot = snapshot_of(view, hidden);
+    assert_eq!(
+        hidden_snapshot.lki.name, HIDDEN,
+        "{label}: the hidden mana source is still named"
+    );
+    assert!(hidden_snapshot.lki.card_types.is_empty(), "{label}: types");
+    assert!(hidden_snapshot.lki.subtypes.is_empty(), "{label}: subtypes");
+    assert!(
+        hidden_snapshot.lki.supertypes.is_empty(),
+        "{label}: supertypes"
+    );
+    assert_eq!(
+        snapshot_of(view, visible),
+        snapshot_of(raw, visible),
+        "{label}: the visible source's entry is kept"
+    );
+    assert_eq!(snapshot_of(view, visible).lki.name, "Forest", "{label}");
+}
+
+fn entry_record(state: &GameState, id: ObjectId) -> &ZoneChangeRecord {
+    state
+        .zone_changes_this_turn
+        .iter()
+        .find(|r| {
+            r.object_id == id && r.from_zone == Some(Zone::Stack) && r.to_zone == Zone::Battlefield
+        })
+        .expect("the Stack -> Battlefield record")
+}
+
+fn record_payment(record: &ZoneChangeRecord) -> &[ManaSpentSourceSnapshot] {
+    &record
+        .trigger_source_context
+        .as_ref()
+        .expect("the record latches a trigger-source context")
+        .mana_spent_source_snapshots
+}
+
+/// Test H1: CR 601.2h + CR 106.3 + CR 400.2: Grizzly Bears paid by a real
+/// Forest and a real Island; Capsize then returns the Island to its owner's
+/// hand. The public Bears keep both payment entries, but the opponent and a
+/// spectator no longer see which card the Island entry was.
+#[test]
+fn visible_permanent_blanks_hidden_mana_source_in_payment_snapshots() {
+    let Some(db) = load_db() else {
+        return;
+    };
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let forest = scenario.add_real_card(P0, "Forest", Zone::Battlefield, db);
+    let island = scenario.add_real_card(P0, "Island", Zone::Battlefield, db);
+    let bears = scenario.add_real_card(P0, "Grizzly Bears", Zone::Hand, db);
+    let capsize = scenario.add_real_card(P0, "Capsize", Zone::Hand, db);
+    let mut runner = scenario.build();
+    engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
+
+    activate_lands(&mut runner, &[forest, island]);
+    commit_cast(&mut runner, bears, None);
+    settle(&mut runner);
+
+    let before = runner.state().clone();
+    assert_eq!(
+        before.objects[&bears].zone,
+        Zone::Battlefield,
+        "reach-guard"
+    );
+    let paid = before.objects[&bears].mana_spent_source_snapshots.clone();
+    assert_payment_names_both(&paid, forest, island, "raw Bears");
+    assert_eq!(before.objects[&bears].mana_spent_to_cast_amount, 2);
+    // Baseline control: while both sources are public nothing is redacted.
+    assert_eq!(
+        filter_state_for_viewer(&before, P1).objects[&bears].mana_spent_source_snapshots,
+        paid,
+        "no over-redaction while every mana source is public"
+    );
+
+    fund(&mut runner, P0, &[(ManaType::Blue, 3)]);
+    commit_cast(&mut runner, capsize, Some(TargetRef::Object(island)));
+    settle(&mut runner);
+
+    let raw = runner.state().clone();
+    assert_eq!(
+        raw.objects[&island].zone,
+        Zone::Hand,
+        "reach-guard: bounced"
+    );
+    let raw_bears = &raw.objects[&bears];
+    assert_payment_names_both(
+        &raw_bears.mana_spent_source_snapshots,
+        forest,
+        island,
+        "raw Bears after the bounce",
+    );
+    let raw_entry = entry_record(&raw, bears);
+    assert_payment_names_both(
+        record_payment(raw_entry),
+        forest,
+        island,
+        "raw Bears Stack->Battlefield record",
+    );
+    assert!(
+        raw.zone_changes_this_turn
+            .iter()
+            .any(|r| r.object_id == island && r.to_zone == Zone::Hand && r.name == "Island"),
+        "reach-guard: the island's own departure was recorded"
+    );
+
+    for (label, view) in [
+        ("P1", filter_state_for_viewer(&raw, P1)),
+        ("spectator", filter_state_for_unseated_viewer(&raw)),
+    ] {
+        assert_eq!(
+            view.objects[&island].name, HIDDEN,
+            "reach-guard ({label}): the mana source is hidden"
+        );
+        let view_bears = &view.objects[&bears];
+        assert_eq!(view_bears.name, "Grizzly Bears", "{label}: Bears public");
+        assert_payment_redacted(
+            &raw_bears.mana_spent_source_snapshots,
+            &view_bears.mana_spent_source_snapshots,
+            island,
+            forest,
+            label,
+        );
+        assert_eq!(view_bears.mana_spent_to_cast_amount, 2, "{label}");
+        assert_eq!(
+            view_bears.mana_spent_to_cast, raw_bears.mana_spent_to_cast,
+            "{label}"
+        );
+        assert_eq!(
+            view_bears.colors_spent_to_cast, raw_bears.colors_spent_to_cast,
+            "{label}: payment facts are kept"
+        );
+        let island_record = view
+            .zone_changes_this_turn
+            .iter()
+            .find(|r| r.object_id == island && r.to_zone == Zone::Hand)
+            .expect("the island's departure record is kept");
+        assert_eq!(island_record.name, HIDDEN, "{label}: hidden-id record");
+        assert!(island_record.trigger_source_context.is_none(), "{label}");
+        assert_payment_redacted(
+            record_payment(raw_entry),
+            record_payment(entry_record(&view, bears)),
+            island,
+            forest,
+            &format!("{label} Bears Stack->Battlefield record"),
+        );
+    }
+
+    let p0 = filter_state_for_viewer(&raw, P0);
+    assert_eq!(p0.objects[&island].name, "Island", "owner sees own hand");
+    assert_eq!(
+        p0.objects[&bears].mana_spent_source_snapshots, raw_bears.mana_spent_source_snapshots,
+        "the owner keeps both payment entries"
+    );
+    assert_eq!(
+        record_payment(entry_record(&p0, bears)),
+        record_payment(raw_entry),
+        "the owner keeps the record's payment entries"
+    );
+    assert_payment_names_both(
+        &runner.state().objects[&bears].mana_spent_source_snapshots,
+        forest,
+        island,
+        "authoritative state after projection",
+    );
+}
+
+/// Pass priority once for the player who holds it.
+fn pass(runner: &mut GameRunner) {
+    runner
+        .act(GameAction::PassPriority)
+        .expect("passing priority must be accepted");
+}
+
+fn assert_priority(state: &GameState, player: PlayerId, label: &str) {
+    assert!(
+        matches!(state.waiting_for, WaitingFor::Priority { player: p } if p == player),
+        "{label}: expected Priority {{ {player:?} }}, got {:?}",
+        state.waiting_for
+    );
+}
+
+fn top_is_trigger(state: &GameState) -> bool {
+    matches!(
+        state.stack.back().map(|entry| &entry.kind),
+        Some(StackEntryKind::TriggeredAbility { .. })
+    )
+}
+
+/// Board H3 (also census sub-case A): Elvish Visionary paid by a real Forest
+/// and a real Island resolves; with its ETB trigger still on the stack,
+/// Capsize returns the Island to P0's hand. Returns (runner, forest, island,
+/// visionary).
+fn visionary_etb_pending_after_island_bounced() -> Option<(GameRunner, ObjectId, ObjectId, ObjectId)>
+{
+    let db = load_db()?;
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    // CR 704.5b: the ETB draw must never deck P0.
+    scenario.add_real_card(P0, "Shock", Zone::Library, db);
+    scenario.add_real_card(P0, "Shock", Zone::Library, db);
+    let forest = scenario.add_real_card(P0, "Forest", Zone::Battlefield, db);
+    let island = scenario.add_real_card(P0, "Island", Zone::Battlefield, db);
+    let visionary = scenario.add_real_card(P0, "Elvish Visionary", Zone::Hand, db);
+    let capsize = scenario.add_real_card(P0, "Capsize", Zone::Hand, db);
+    let mut runner = scenario.build();
+    engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
+
+    activate_lands(&mut runner, &[forest, island]);
+    commit_cast(&mut runner, visionary, None);
+    for _ in 0..6 {
+        let state = runner.state();
+        if state.objects[&visionary].zone == Zone::Battlefield
+            && top_is_trigger(state)
+            && matches!(state.waiting_for, WaitingFor::Priority { player } if player == P0)
+        {
+            break;
+        }
+        pass(&mut runner);
+    }
+    let state = runner.state();
+    assert_eq!(
+        state.objects[&visionary].zone,
+        Zone::Battlefield,
+        "reach-guard: the Visionary resolved"
+    );
+    assert_eq!(
+        state.stack.len(),
+        1,
+        "reach-guard: only the ETB is on the stack"
+    );
+    assert!(
+        top_is_trigger(state),
+        "reach-guard: the ETB trigger is on the stack"
+    );
+    assert_priority(state, P0, "reach-guard: P0 holds priority over the ETB");
+
+    // `fund` adds pool units without passing priority, so the ETB stays put.
+    fund(&mut runner, P0, &[(ManaType::Blue, 3)]);
+    commit_cast(&mut runner, capsize, Some(TargetRef::Object(island)));
+    pass(&mut runner);
+    pass(&mut runner);
+    let state = runner.state();
+    assert_eq!(
+        state.objects[&island].zone,
+        Zone::Hand,
+        "reach-guard: bounced"
+    );
+    assert_eq!(state.stack.len(), 1, "reach-guard: only Capsize resolved");
+    assert!(
+        top_is_trigger(state),
+        "reach-guard: the ETB is still pending"
+    );
+    assert_priority(state, P0, "reach-guard: P0 holds priority again");
+    Some((runner, forest, island, visionary))
+}
+
+/// The ETB stack entry's latched payment and its `trigger_event` record's payment.
+fn etb_payments(state: &GameState) -> (&[ManaSpentSourceSnapshot], &[ManaSpentSourceSnapshot]) {
+    let entry = state.stack.back().expect("the ETB entry");
+    let StackEntryKind::TriggeredAbility {
+        ability,
+        trigger_event,
+        ..
+    } = &entry.kind
+    else {
+        panic!("top of stack is not a triggered ability: {:?}", entry.kind);
+    };
+    let ability_payment = &ability
+        .trigger_source
+        .as_ref()
+        .expect("the ETB latched its source context")
+        .mana_spent_source_snapshots;
+    let Some(GameEvent::ZoneChanged { record, .. }) = trigger_event else {
+        panic!("the ETB's trigger_event is not a ZoneChanged: {trigger_event:?}");
+    };
+    (ability_payment, record_payment(record))
+}
+
+/// Public stack attribution of the ETB entry (never suppressed).
+fn etb_attribution(state: &GameState) -> (ObjectId, Option<String>, Option<String>, String) {
+    let entry = state.stack.back().expect("the ETB entry");
+    let StackEntryKind::TriggeredAbility {
+        ability,
+        description,
+        source_name,
+        ..
+    } = &entry.kind
+    else {
+        panic!("top of stack is not a triggered ability");
+    };
+    (
+        entry.source_id,
+        ability.description.clone(),
+        description.clone(),
+        source_name.clone(),
+    )
+}
+
+/// Test H3: CR 113.7a + CR 601.2h: a triggered ability's latched source context,
+/// its trigger event's record, and the turn's zone-change journal all clone the
+/// paying sources. After the Island is bounced, the opponent and a spectator
+/// see each latched copy blanked for the Island and intact for the Forest,
+/// while the public stack attribution is unchanged.
+#[test]
+fn latched_trigger_contexts_blank_hidden_mana_source() {
+    let Some((runner, forest, island, visionary)) = visionary_etb_pending_after_island_bounced()
+    else {
+        return;
+    };
+    let raw = runner.state().clone();
+    let (raw_ability, raw_event) = etb_payments(&raw);
+    assert_payment_names_both(raw_ability, forest, island, "raw ETB trigger_source");
+    assert_payment_names_both(raw_event, forest, island, "raw ETB trigger_event");
+    let raw_entry = entry_record(&raw, visionary);
+    assert_payment_names_both(
+        record_payment(raw_entry),
+        forest,
+        island,
+        "raw Visionary Stack->Battlefield record",
+    );
+    let raw_object = &raw.objects[&visionary].mana_spent_source_snapshots;
+    assert_payment_names_both(raw_object, forest, island, "raw Visionary object");
+
+    for (label, view) in [
+        ("P1", filter_state_for_viewer(&raw, P1)),
+        ("spectator", filter_state_for_unseated_viewer(&raw)),
+    ] {
+        assert_eq!(
+            view.objects[&island].name, HIDDEN,
+            "reach-guard ({label}): the mana source is hidden"
+        );
+        let (ability, event) = etb_payments(&view);
+        assert_payment_redacted(
+            raw_ability,
+            ability,
+            island,
+            forest,
+            &format!("{label} ETB trigger_source"),
+        );
+        assert_payment_redacted(
+            raw_event,
+            event,
+            island,
+            forest,
+            &format!("{label} ETB trigger_event"),
+        );
+        assert_payment_redacted(
+            record_payment(raw_entry),
+            record_payment(entry_record(&view, visionary)),
+            island,
+            forest,
+            &format!("{label} Visionary record"),
+        );
+        assert_payment_redacted(
+            raw_object,
+            &view.objects[&visionary].mana_spent_source_snapshots,
+            island,
+            forest,
+            &format!("{label} Visionary object"),
+        );
+        assert_eq!(
+            etb_attribution(&view),
+            etb_attribution(&raw),
+            "{label}: public stack attribution is never suppressed"
+        );
+    }
+
+    let p0 = filter_state_for_viewer(&raw, P0);
+    let (ability, event) = etb_payments(&p0);
+    assert_eq!(ability, raw_ability, "owner keeps the latched payment");
+    assert_eq!(event, raw_event, "owner keeps the trigger event's payment");
+}
+
+/// Board H4 (also census sub-case B): Grizzly Bears paid by a real Forest and
+/// a real Island is cast; Capsize returns the Island to P0's hand while the
+/// Bears spell waits on the stack; Counterspell then counters the Bears, so
+/// the real `record_departed_stack_spell` writer stores the departed spell.
+/// Returns (runner, forest, island, bears).
+fn bears_countered_after_island_bounced() -> Option<(GameRunner, ObjectId, ObjectId, ObjectId)> {
+    let db = load_db()?;
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let forest = scenario.add_real_card(P0, "Forest", Zone::Battlefield, db);
+    let island = scenario.add_real_card(P0, "Island", Zone::Battlefield, db);
+    let bears = scenario.add_real_card(P0, "Grizzly Bears", Zone::Hand, db);
+    let capsize = scenario.add_real_card(P0, "Capsize", Zone::Hand, db);
+    let counterspell = scenario.add_real_card(P0, "Counterspell", Zone::Hand, db);
+    let mut runner = scenario.build();
+    engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
+
+    activate_lands(&mut runner, &[forest, island]);
+    commit_cast(&mut runner, bears, None);
+    let state = runner.state();
+    assert_eq!(state.objects[&bears].zone, Zone::Stack, "reach-guard");
+    assert_eq!(state.stack.len(), 1, "reach-guard: the Bears spell");
+    assert_payment_names_both(
+        &state.objects[&bears].mana_spent_source_snapshots,
+        forest,
+        island,
+        "raw Bears spell",
+    );
+
+    fund(&mut runner, P0, &[(ManaType::Blue, 3)]);
+    commit_cast(&mut runner, capsize, Some(TargetRef::Object(island)));
+    pass(&mut runner);
+    pass(&mut runner);
+    let state = runner.state();
+    assert_eq!(
+        state.objects[&island].zone,
+        Zone::Hand,
+        "reach-guard: bounced"
+    );
+    assert_eq!(state.stack.len(), 1, "reach-guard: only Capsize resolved");
+    assert_eq!(state.objects[&bears].zone, Zone::Stack, "reach-guard");
+    assert_eq!(
+        state.stack.back().map(|entry| entry.source_id),
+        Some(bears),
+        "reach-guard: the Bears spell is still on the stack"
+    );
+    assert_priority(state, P0, "reach-guard: P0 holds priority");
+
+    fund(&mut runner, P0, &[(ManaType::Blue, 2)]);
+    commit_cast(&mut runner, counterspell, Some(TargetRef::Object(bears)));
+    settle(&mut runner);
+    assert_eq!(
+        runner.state().objects[&bears].zone,
+        Zone::Graveyard,
+        "reach-guard: countered"
+    );
+    Some((runner, forest, island, bears))
+}
+
+/// Test H4: CR 608.2h + CR 601.2h: a countered spell's departed stack copy keeps
+/// its payment snapshots. The Bears' key is public, so the entry is kept; only
+/// the bounced Island's snapshot inside it is blanked for the opponent.
+#[test]
+fn departed_stack_spell_blanks_hidden_mana_source() {
+    let Some((runner, forest, island, bears)) = bears_countered_after_island_bounced() else {
+        return;
+    };
+    let raw = runner.state().clone();
+    let raw_departed = raw
+        .departed_stack_spells
+        .get(&bears)
+        .expect("reach-guard: the countered Bears were recorded as departed");
+    assert!(!raw_departed.is_empty(), "reach-guard: one incarnation");
+    for departed in raw_departed.values() {
+        assert_payment_names_both(
+            &departed.object.mana_spent_source_snapshots,
+            forest,
+            island,
+            "raw departed Bears object",
+        );
+    }
+
+    for (label, view) in [
+        ("P1", filter_state_for_viewer(&raw, P1)),
+        ("spectator", filter_state_for_unseated_viewer(&raw)),
+    ] {
+        assert_eq!(
+            view.objects[&island].name, HIDDEN,
+            "reach-guard ({label}): the mana source is hidden"
+        );
+        let departed = view
+            .departed_stack_spells
+            .get(&bears)
+            .expect("a public departed spell keeps its entry");
+        assert_eq!(departed.len(), raw_departed.len(), "{label}");
+        for (incarnation, raw_spell) in raw_departed.iter() {
+            let spell = &departed[incarnation];
+            assert_payment_redacted(
+                &raw_spell.object.mana_spent_source_snapshots,
+                &spell.object.mana_spent_source_snapshots,
+                island,
+                forest,
+                &format!("{label} departed object"),
+            );
+            let raw_entry_payment = raw_spell
+                .entry
+                .ability()
+                .and_then(|ability| ability.trigger_source.as_ref())
+                .map(|context| &context.mana_spent_source_snapshots);
+            let entry_payment = spell
+                .entry
+                .ability()
+                .and_then(|ability| ability.trigger_source.as_ref())
+                .map(|context| &context.mana_spent_source_snapshots);
+            assert_eq!(
+                entry_payment.map(Vec::len),
+                raw_entry_payment.map(Vec::len),
+                "{label}: departed entry payment presence and length kept"
+            );
+            if let (Some(raw_payment), Some(payment)) = (raw_entry_payment, entry_payment) {
+                if raw_payment.iter().any(|s| s.source_id == island) {
+                    assert_payment_redacted(
+                        raw_payment,
+                        payment,
+                        island,
+                        forest,
+                        &format!("{label} departed entry"),
+                    );
+                }
+            }
+        }
+    }
+
+    let p0 = filter_state_for_viewer(&raw, P0);
+    for (incarnation, raw_spell) in raw_departed.iter() {
+        assert_eq!(
+            p0.departed_stack_spells[&bears][incarnation]
+                .object
+                .mana_spent_source_snapshots,
+            raw_spell.object.mana_spent_source_snapshots,
+            "the owner keeps the departed spell's payment"
+        );
+    }
+}
+
+/// Collect every array under the key `key`, at any depth, with its JSON path.
+fn walk_key_arrays(
+    value: &serde_json::Value,
+    key: &str,
+    path: &str,
+    out: &mut Vec<(String, Vec<serde_json::Value>)>,
+) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for (name, child) in map {
+                let child_path = format!("{path}/{name}");
+                if name == key {
+                    if let serde_json::Value::Array(items) = child {
+                        out.push((child_path.clone(), items.clone()));
+                    }
+                }
+                walk_key_arrays(child, key, &child_path, out);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for (index, child) in items.iter().enumerate() {
+                walk_key_arrays(child, key, &format!("{path}/{index}"), out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn payment_paths(value: &serde_json::Value) -> Vec<(String, Vec<serde_json::Value>)> {
+    let mut out = Vec::new();
+    walk_key_arrays(value, "mana_spent_source_snapshots", "", &mut out);
+    out
+}
+
+fn snapshot_name(item: &serde_json::Value) -> Option<&str> {
+    item.pointer("/lki/name")
+        .and_then(serde_json::Value::as_str)
+}
+
+fn items_from<'a>(
+    items: &'a [serde_json::Value],
+    source: &'a serde_json::Value,
+) -> impl Iterator<Item = &'a serde_json::Value> {
+    items
+        .iter()
+        .filter(move |item| item.get("source_id") == Some(source))
+}
+
+/// A named in-scope carrier path predicate the census requires in the raw state.
+type RequiredPath<'a> = (&'a str, &'a dyn Fn(&str) -> bool);
+
+/// Census H2: walk every `mana_spent_source_snapshots` array, at any depth, in
+/// the raw state and in each viewer wire form, and require the hidden Island
+/// to be blanked everywhere and the visible Forest kept everywhere.
+fn assert_payment_census(
+    raw: &GameState,
+    forest: ObjectId,
+    island: ObjectId,
+    required: &[RequiredPath<'_>],
+    label: &str,
+) {
+    let island_id = serde_json::to_value(island).expect("id serializes");
+    let forest_id = serde_json::to_value(forest).expect("id serializes");
+    let raw_paths = payment_paths(&serde_json::to_value(raw).expect("raw state serializes"));
+    let raw_list: Vec<&String> = raw_paths.iter().map(|(path, _)| path).collect();
+    for (name, matches) in required {
+        assert!(
+            raw_paths.iter().any(|(path, items)| matches(path)
+                && items_from(items, &island_id).any(|i| snapshot_name(i) == Some("Island"))),
+            "{label}: reach-guard: no raw `{name}` path names the Island; raw paths: {raw_list:#?}"
+        );
+    }
+
+    let views = [
+        (
+            "P1",
+            serde_json::to_value(filter_state_for_viewer(raw, P1)).expect("P1 serializes"),
+        ),
+        (
+            "spectator",
+            serde_json::to_value(filter_state_for_unseated_viewer(raw))
+                .expect("spectator serializes"),
+        ),
+        (
+            "client wire P1",
+            serde_json::to_value(ClientGameStateRef::wrap(raw, Some(P1)))
+                .expect("client wire serializes"),
+        ),
+    ];
+    for (view_label, view) in &views {
+        let paths = payment_paths(view);
+        let list: Vec<&String> = paths.iter().map(|(path, _)| path).collect();
+        for (path, items) in &paths {
+            for item in items_from(items, &island_id) {
+                assert_eq!(
+                    snapshot_name(item),
+                    Some(HIDDEN),
+                    "{label}/{view_label}: `{path}` still names the hidden Island; paths: {list:#?}"
+                );
+            }
+        }
+        for (raw_path, raw_items) in &raw_paths {
+            let raw_island = items_from(raw_items, &island_id).count();
+            let raw_forest = items_from(raw_items, &forest_id).count();
+            if raw_island + raw_forest == 0 {
+                continue;
+            }
+            let Some((_, items)) = paths
+                .iter()
+                .find(|(path, _)| path.ends_with(raw_path.as_str()))
+            else {
+                // A carrier the projection drops wholesale (e.g. the
+                // `resolved_rules_journal` reset) cannot leak; an in-scope
+                // carrier must survive with its slots.
+                assert!(
+                    !required.iter().any(|(_, matches)| matches(raw_path)),
+                    "{label}/{view_label}: in-scope path `{raw_path}` is missing; paths: {list:#?}"
+                );
+                continue;
+            };
+            assert_eq!(
+                items.len(),
+                raw_items.len(),
+                "{label}/{view_label}: `{raw_path}` length changed"
+            );
+            assert_eq!(
+                items_from(items, &island_id).count(),
+                raw_island,
+                "{label}/{view_label}: `{raw_path}` island entries"
+            );
+            let forest_items: Vec<_> = items_from(items, &forest_id).collect();
+            assert_eq!(forest_items.len(), raw_forest, "{label}/{view_label}");
+            for item in forest_items {
+                assert_eq!(
+                    snapshot_name(item),
+                    Some("Forest"),
+                    "{label}/{view_label}: `{raw_path}` lost the visible Forest"
+                );
+            }
+        }
+    }
+}
+
+/// Test H2: the payment-snapshot census over boards H3 (sub-case A) and H4
+/// (sub-case B). A survivor anywhere fails with its path.
+#[test]
+fn payment_snapshot_census_blanks_hidden_source_in_every_wire_form() {
+    let Some((runner, forest, island, visionary)) = visionary_etb_pending_after_island_bounced()
+    else {
+        return;
+    };
+    let objects_path = format!("/objects/{}/mana_spent_source_snapshots", visionary.0);
+    let object_path = |path: &str| path == objects_path;
+    let journal_path = |path: &str| path.starts_with("/zone_changes_this_turn/");
+    let stack_ability_path = |path: &str| path.starts_with("/stack/") && path.contains("/ability/");
+    let stack_event_path =
+        |path: &str| path.starts_with("/stack/") && path.contains("/trigger_event/");
+    assert_payment_census(
+        runner.state(),
+        forest,
+        island,
+        &[
+            ("objects[visionary]", &object_path),
+            ("zone_changes_this_turn", &journal_path),
+            ("stack ability", &stack_ability_path),
+            ("stack trigger_event", &stack_event_path),
+        ],
+        "sub-case A",
+    );
+
+    let Some((runner, forest, island, bears)) = bears_countered_after_island_bounced() else {
+        return;
+    };
+    let departed_prefix = format!("/departed_stack_spells/{}/", bears.0);
+    let departed_object_path = |path: &str| {
+        path.starts_with(&departed_prefix) && path.ends_with("/object/mana_spent_source_snapshots")
+    };
+    // Probed: the departed Bears' Spell-kind entry carries no ability payment,
+    // so only its object is required; the H4 test asserts the entry
+    // conditionally.
+    assert_payment_census(
+        runner.state(),
+        forest,
+        island,
+        &[
+            ("departed_stack_spells[bears].object", &departed_object_path),
+            ("zone_changes_this_turn", &journal_path),
+        ],
+        "sub-case B",
+    );
+}
+
+/// Test H5: CR 601.2h + CR 400.2: the sacrifice ledger's record of a paid
+/// creature latches its payment snapshots. Grizzly Bears paid by a real Forest
+/// and a real Island are sacrificed to Goblin Bombardment, then Capsize returns
+/// the Island to P0's hand: the public Bears' record keeps both slots, and only
+/// the Island's identity is blanked for the opponent and a spectator.
+#[test]
+fn sacrifice_record_blanks_hidden_mana_source() {
+    let Some(db) = load_db() else {
+        return;
+    };
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let bombardment = scenario
+        .add_creature(P0, "Goblin Bombardment", 0, 0)
+        .as_enchantment()
+        .from_oracle_text(GOBLIN_BOMBARDMENT)
+        .id();
+    let forest = scenario.add_real_card(P0, "Forest", Zone::Battlefield, db);
+    let island = scenario.add_real_card(P0, "Island", Zone::Battlefield, db);
+    let bears = scenario.add_real_card(P0, "Grizzly Bears", Zone::Hand, db);
+    let capsize = scenario.add_real_card(P0, "Capsize", Zone::Hand, db);
+    let mut runner = scenario.build();
+    engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
+
+    activate_lands(&mut runner, &[forest, island]);
+    commit_cast(&mut runner, bears, None);
+    settle(&mut runner);
+    sacrifice_to_bombardment(&mut runner, bombardment, bears);
+    fund(&mut runner, P0, &[(ManaType::Blue, 3)]);
+    commit_cast(&mut runner, capsize, Some(TargetRef::Object(island)));
+    settle(&mut runner);
+
+    let raw = runner.state().clone();
+    assert_eq!(raw.objects[&bears].zone, Zone::Graveyard, "reach-guard");
+    assert_eq!(
+        raw.objects[&island].zone,
+        Zone::Hand,
+        "reach-guard: bounced"
+    );
+    let raw_record = sacrifice_named(&raw, bears).expect("reach-guard: the sacrifice record");
+    assert_payment_names_both(
+        record_payment(&raw_record),
+        forest,
+        island,
+        "raw Bears sacrifice record",
+    );
+
+    for (label, view) in [
+        ("P1", filter_state_for_viewer(&raw, P1)),
+        ("spectator", filter_state_for_unseated_viewer(&raw)),
+    ] {
+        assert_eq!(
+            view.objects[&island].name, HIDDEN,
+            "reach-guard ({label}): the mana source is hidden"
+        );
+        let record = sacrifice_named(&view, bears).expect("the public record is kept");
+        assert_eq!(
+            record.name, "Grizzly Bears",
+            "{label}: a public sacrificed creature keeps its name"
+        );
+        assert_payment_redacted(
+            record_payment(&raw_record),
+            record_payment(&record),
+            island,
+            forest,
+            &format!("{label} sacrifice record"),
+        );
+    }
+    let p0 = filter_state_for_viewer(&raw, P0);
+    assert_eq!(
+        record_payment(&sacrifice_named(&p0, bears).expect("owner record")),
+        record_payment(&raw_record),
+        "the owner keeps the sacrifice record's payment"
     );
 }
