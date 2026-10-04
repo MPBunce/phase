@@ -3552,16 +3552,46 @@ fn redact_printed_identity(obj: &mut crate::game::game_object::GameObject) {
     obj.base_printed_ref = None;
 }
 
+/// The retained event shapes that carry a `ZoneChangeRecord` or a `TriggerSourceContext`:
+/// `ZoneChanged`, `CreatureExploited` (the sacrificed victim's record) and
+/// `SagaChapterAbilityResolved` (the Saga's latched trigger-source context). A record whose
+/// object is hidden is redacted whole; otherwise only hidden-source payment entries are.
+/// The Saga context is never redacted whole here; only its payment entries are.
 fn redact_hidden_zone_change_event(event: &mut GameEvent, hidden_ids: &HashSet<ObjectId>) {
-    if let GameEvent::ZoneChanged {
-        object_id, record, ..
-    } = event
-    {
-        if hidden_ids.contains(object_id) {
-            redact_zone_change_record(record);
-        } else {
-            redact_record_payment(record, hidden_ids);
+    match event {
+        GameEvent::ZoneChanged {
+            object_id,
+            record,
+            from: _,
+            to: _,
+        } => {
+            if hidden_ids.contains(object_id) {
+                redact_zone_change_record(record);
+            } else {
+                redact_record_payment(record, hidden_ids);
+            }
         }
+        GameEvent::CreatureExploited {
+            exploiter: _,
+            exploiter_incarnation: _,
+            sacrificed,
+            record,
+        } => {
+            if hidden_ids.contains(sacrificed) {
+                redact_zone_change_record(record);
+            } else {
+                redact_record_payment(record, hidden_ids);
+            }
+        }
+        GameEvent::SagaChapterAbilityResolved {
+            saga,
+            controller: _,
+            chapter: _,
+            final_chapter: _,
+        } => {
+            redact_payment_source_snapshots(&mut saga.mana_spent_source_snapshots, hidden_ids);
+        }
+        _ => {}
     }
 }
 
@@ -3575,6 +3605,14 @@ fn redact_hidden_zone_change_event(event: &mut GameEvent, hidden_ids: &HashSet<O
 /// Accepted display divergence: a derived "mana from a <type> source" quantity computed on
 /// the projected state reads the blanked types of a hidden source. Those quantities are
 /// rules decisions evaluated on authoritative state, never on the projection.
+///
+/// Carriers covered: public `objects`; public departed stack spells (object and entry
+/// ability); the zone-change and sacrifice ledgers; the `ZoneChanged`, `CreatureExploited`
+/// and `SagaChapterAbilityResolved` events held as a stack or resolving entry's
+/// `trigger_event`, in `stack_trigger_event_batches`, `current_trigger_event(s)` and as a
+/// creation look-back event; and `ResolvedAbility::trigger_source` (with its sub/else
+/// chain) on stack and resolving entries and on delayed, pending, deferred and
+/// ordering triggers. Any other carrier is out of scope of this redaction.
 ///
 /// The wire census guard covers only the `mana_spent_source_snapshots` key;
 /// `cast_cost_paid_object` (`GameObject`, `TriggerSourceContext`,
@@ -3619,6 +3657,32 @@ fn redact_ability_payment(
     }
 }
 
+/// Read-only twin of `redact_payment_source_snapshots`: does any entry name a hidden source?
+fn payment_names_hidden_source(
+    snapshots: &[crate::types::game_state::ManaSpentSourceSnapshot],
+    hidden_ids: &HashSet<ObjectId>,
+) -> bool {
+    snapshots
+        .iter()
+        .any(|snapshot| hidden_ids.contains(&snapshot.source_id))
+}
+
+/// Read-only twin of `redact_ability_payment`, over the same sub/else chain.
+fn ability_payment_names_hidden_source(
+    ability: &crate::types::ability::ResolvedAbility,
+    hidden_ids: &HashSet<ObjectId>,
+) -> bool {
+    ability.trigger_source.as_ref().is_some_and(|context| {
+        payment_names_hidden_source(&context.mana_spent_source_snapshots, hidden_ids)
+    }) || ability
+        .sub_ability
+        .as_deref()
+        .is_some_and(|sub_ability| ability_payment_names_hidden_source(sub_ability, hidden_ids))
+        || ability.else_ability.as_deref().is_some_and(|else_ability| {
+            ability_payment_names_hidden_source(else_ability, hidden_ids)
+        })
+}
+
 /// CR 400.2 + CR 400.7: id-keyed history that names an object the viewer cannot identify.
 ///
 /// `hide_card` blanks the object itself, but the engine keeps the `ObjectId` stable across
@@ -3659,8 +3723,31 @@ fn redact_hidden_identity_side_tables(state: &mut GameState, hidden_ids: &HashSe
     }
     // CR 601.2h + CR 400.2: only public-id departed spells remain; each keeps its entry and
     // object, and loses the last-known identity of any hidden mana source that paid for it.
-    for (_, incarnations) in state.departed_stack_spells.iter_mut() {
-        for (_, departed) in incarnations.iter_mut() {
+    // A read-only pass selects the incarnations that name a hidden source; only those are
+    // taken mutably, so this pass does not force a copy of any other departed spell.
+    let departed_to_redact: Vec<(ObjectId, u64)> = state
+        .departed_stack_spells
+        .iter()
+        .flat_map(|(id, incarnations)| {
+            incarnations
+                .iter()
+                .filter(|(_, departed)| {
+                    payment_names_hidden_source(
+                        &departed.object.mana_spent_source_snapshots,
+                        hidden_ids,
+                    ) || departed.entry.ability().is_some_and(|ability| {
+                        ability_payment_names_hidden_source(ability, hidden_ids)
+                    })
+                })
+                .map(move |(incarnation, _)| (*id, *incarnation))
+        })
+        .collect();
+    for (id, incarnation) in departed_to_redact {
+        if let Some(departed) = state
+            .departed_stack_spells
+            .get_mut(&id)
+            .and_then(|incarnations| incarnations.get_mut(&incarnation))
+        {
             redact_payment_source_snapshots(
                 &mut departed.object.mana_spent_source_snapshots,
                 hidden_ids,
@@ -4486,13 +4573,15 @@ mod tests {
         );
     }
 
-    /// CR 601.2h + CR 106.3 + CR 400.2: every public carrier that latches a cast object's
-    /// payment snapshots blanks ONLY the entry whose mana source is now hidden, keeping its
-    /// `source_id`, the vector length and order, and the visible-source sibling. SHAPE test:
-    /// the carriers are seeded so that every projection arm is reached, including those the
-    /// real-writer boards in tests/integration/issue_9377_hidden_identity_side_tables.rs
-    /// cannot reach (sacrifice ledger, resolving entry, trigger-event batches, delayed /
-    /// pending / deferred / ordering triggers, a departed entry's ability, sub-abilities).
+    /// CR 601.2h + CR 106.3 + CR 400.2: each public carrier listed on
+    /// `redact_payment_source_snapshots` that latches a cast object's payment snapshots
+    /// blanks ONLY the entry whose mana source is now hidden, keeping its `source_id`, the
+    /// vector length and order, and the visible-source sibling. SHAPE test: those carriers
+    /// are seeded directly, including those the real-writer boards in
+    /// tests/integration/issue_9377_hidden_identity_side_tables.rs cannot reach (sacrifice
+    /// ledger, resolving entry, trigger-event batches, `SagaChapterAbilityResolved` and
+    /// `CreatureExploited` trigger events, delayed / pending / deferred / ordering triggers,
+    /// a departed entry's ability, sub-abilities). Creation look-back events are not seeded.
     #[test]
     fn public_carriers_blank_only_hidden_mana_source_payment_snapshots() {
         let mut state = GameState::new_two_player(42);
@@ -4567,6 +4656,25 @@ mod tests {
             to: Zone::Battlefield,
             record: Box::new(record.clone()),
         };
+        // The two other retained event shapes that latch the payment: a Saga's chapter
+        // resolution (its trigger-source context) and an exploit (the victim's record).
+        let saga_event = GameEvent::SagaChapterAbilityResolved {
+            saga: Box::new(
+                record
+                    .trigger_source_context
+                    .clone()
+                    .expect("reach-guarded above"),
+            ),
+            controller: owner,
+            chapter: 1,
+            final_chapter: 3,
+        };
+        let exploit_event = GameEvent::CreatureExploited {
+            exploiter: paid,
+            exploiter_incarnation: None,
+            sacrificed: paid,
+            record: Box::new(record.clone()),
+        };
         let trigger_entry = StackEntry {
             id: ObjectId(800),
             source_id: paid,
@@ -4597,15 +4705,33 @@ mod tests {
             .sacrificed_permanents_this_turn
             .push_back(record.clone());
         state.stack.push_back(trigger_entry.clone());
+        for (id, other_event) in [
+            (ObjectId(802), &saga_event),
+            (ObjectId(803), &exploit_event),
+        ] {
+            let mut entry = StackEntry {
+                id,
+                ..trigger_entry.clone()
+            };
+            if let StackEntryKind::TriggeredAbility { trigger_event, .. } = &mut entry.kind {
+                *trigger_event = Some(other_event.clone());
+            }
+            state.stack.push_back(entry);
+        }
         state.resolving_stack_entry = Some(StackEntry {
             id: ObjectId(801),
             ..trigger_entry.clone()
         });
-        state
-            .stack_trigger_event_batches
-            .insert(ObjectId(800), vec![event.clone()]);
+        state.stack_trigger_event_batches.insert(
+            ObjectId(800),
+            vec![event.clone(), saga_event.clone(), exploit_event.clone()],
+        );
         state.current_trigger_event = Some(event.clone());
-        state.current_trigger_events.push(event.clone());
+        state.current_trigger_events.extend([
+            event.clone(),
+            saga_event.clone(),
+            exploit_event.clone(),
+        ]);
         state.delayed_triggers.push(DelayedTrigger::new(
             crate::types::ability::DelayedTriggerCondition::AtNextPhase {
                 phase: crate::types::phase::Phase::End,
@@ -4632,25 +4758,32 @@ mod tests {
             resume_after_ordering: None,
         });
         let departed_object = state.objects[&departed].clone();
+        let departed_spell = |ability: ResolvedAbility, object: GameObject| DepartedStackSpell {
+            entry: StackEntry {
+                id: departed,
+                source_id: departed,
+                controller: owner,
+                kind: StackEntryKind::Spell {
+                    card_id: CardId(14),
+                    ability: Some(Box::new(ability)),
+                    casting_variant: CastingVariant::default(),
+                    actual_mana_spent: 2,
+                },
+            },
+            object: Box::new(object),
+        };
+        // Incarnation 2 names the hidden source only in its entry ability's sub-ability, so
+        // the read-only selection must find it through the ability chain alone.
+        let mut unpaid_object = departed_object.clone();
+        unpaid_object.mana_spent_source_snapshots.clear();
+        let mut sub_only = ResolvedAbility::new(Effect::NoOp, Vec::new(), departed, owner);
+        sub_only.sub_ability = Some(Box::new(ability.clone()));
         state.departed_stack_spells.insert(
             departed,
-            im::HashMap::from(vec![(
-                1u64,
-                DepartedStackSpell {
-                    entry: StackEntry {
-                        id: departed,
-                        source_id: departed,
-                        controller: owner,
-                        kind: StackEntryKind::Spell {
-                            card_id: CardId(14),
-                            ability: Some(Box::new(ability.clone())),
-                            casting_variant: CastingVariant::default(),
-                            actual_mana_spent: 2,
-                        },
-                    },
-                    object: Box::new(departed_object),
-                },
-            )]),
+            im::HashMap::from(vec![
+                (1u64, departed_spell(ability.clone(), departed_object)),
+                (2u64, departed_spell(sub_only, unpaid_object)),
+            ]),
         );
 
         // Every payment vector the projection retains, labelled by carrier.
@@ -4667,11 +4800,15 @@ mod tests {
                     .unwrap_or_default()
             };
             let from_event = |event: &GameEvent| match event {
-                GameEvent::ZoneChanged { record, .. } => record
+                GameEvent::ZoneChanged { record, .. }
+                | GameEvent::CreatureExploited { record, .. } => record
                     .trigger_source_context
                     .as_ref()
                     .map(|context| context.mana_spent_source_snapshots.clone())
                     .unwrap_or_default(),
+                GameEvent::SagaChapterAbilityResolved { saga, .. } => {
+                    saga.mana_spent_source_snapshots.clone()
+                }
                 _ => Vec::new(),
             };
             for (id, object) in state.objects.iter() {
@@ -4759,10 +4896,26 @@ mod tests {
                 }
             }
             for (_, incarnations) in state.departed_stack_spells.iter() {
-                for (_, spell) in incarnations.iter() {
-                    push("departed object", &spell.object.mana_spent_source_snapshots);
+                for (incarnation, spell) in incarnations.iter() {
+                    if !spell.object.mana_spent_source_snapshots.is_empty() {
+                        push(
+                            &format!("departed {incarnation} object"),
+                            &spell.object.mana_spent_source_snapshots,
+                        );
+                    }
                     if let Some(ability) = spell.entry.ability() {
-                        push("departed entry ability", &from_ability(ability));
+                        if ability.trigger_source.is_some() {
+                            push(
+                                &format!("departed {incarnation} entry ability"),
+                                &from_ability(ability),
+                            );
+                        }
+                        if let Some(sub) = ability.sub_ability.as_deref() {
+                            push(
+                                &format!("departed {incarnation} entry sub_ability"),
+                                &from_ability(sub),
+                            );
+                        }
                     }
                 }
             }
@@ -4779,6 +4932,10 @@ mod tests {
             "entry ObjectId(800) trigger_event",
             "entry ObjectId(801) ability",
             "entry ObjectId(801) trigger_event",
+            // `SagaChapterAbilityResolved` and `CreatureExploited` trigger events; both are
+            // also seeded into the batches and `current_trigger_events` below.
+            "entry ObjectId(802) trigger_event",
+            "entry ObjectId(803) trigger_event",
             "stack_trigger_event_batches",
             "current_trigger_event",
             "current_trigger_events",
@@ -4786,8 +4943,10 @@ mod tests {
             "pending_trigger",
             "deferred_triggers",
             "pending_trigger_order",
-            "departed object",
-            "departed entry ability",
+            "departed 1 object",
+            "departed 1 entry ability",
+            "departed 1 entry sub_ability",
+            "departed 2 entry sub_ability",
         ];
         for label in expected_labels {
             assert!(
@@ -4838,6 +4997,68 @@ mod tests {
             carriers(&state),
             raw,
             "authoritative state is untouched by the projection"
+        );
+    }
+
+    /// CR 702.110b + CR 400.2: a `CreatureExploited` record whose sacrificed victim is now
+    /// hidden is redacted whole, exactly like a `ZoneChanged` record of a hidden object.
+    /// SHAPE test: the event is seeded directly as the current trigger event.
+    #[test]
+    fn exploited_record_of_hidden_victim_is_redacted_whole() {
+        let mut state = GameState::new_two_player(42);
+        let owner = PlayerId(0);
+        let opponent_id = PlayerId(1);
+        let exploiter = create_object(
+            &mut state,
+            CardId(21),
+            owner,
+            "Public Exploiter".to_string(),
+            Zone::Battlefield,
+        );
+        let victim = create_object(
+            &mut state,
+            CardId(22),
+            owner,
+            "Secret Victim".to_string(),
+            Zone::Hand,
+        );
+        let record = state.objects[&victim].snapshot_for_zone_change(
+            victim,
+            Some(Zone::Battlefield),
+            Zone::Graveyard,
+        );
+        state.current_trigger_event = Some(GameEvent::CreatureExploited {
+            exploiter,
+            exploiter_incarnation: None,
+            sacrificed: victim,
+            record: Box::new(record),
+        });
+        let victim_record = |state: &GameState| match state.current_trigger_event.as_ref() {
+            Some(GameEvent::CreatureExploited { record, .. }) => {
+                (record.name.clone(), record.trigger_source_context.is_some())
+            }
+            other => panic!("expected the exploit event, got {other:?}"),
+        };
+        assert_eq!(
+            victim_record(&state),
+            ("Secret Victim".to_string(), true),
+            "reach-guard: the raw record names the victim and latches its context"
+        );
+
+        let opponent = filter_state_for_viewer(&state, opponent_id);
+        assert_eq!(
+            opponent.objects[&victim].name, HIDDEN_CARD_NAME,
+            "reach-guard: the victim in hand is hidden from the opponent"
+        );
+        assert_eq!(
+            victim_record(&opponent),
+            (HIDDEN_CARD_NAME.to_string(), false),
+            "the hidden victim's exploit record is redacted whole"
+        );
+        assert_eq!(
+            victim_record(&filter_state_for_viewer(&state, owner)),
+            ("Secret Victim".to_string(), true),
+            "the owner keeps the record"
         );
     }
 
