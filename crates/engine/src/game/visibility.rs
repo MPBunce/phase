@@ -1650,6 +1650,125 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
     for event in &mut filtered.current_trigger_events {
         redact_hidden_zone_change_event(event, &hidden_zone_change_ids);
     }
+    // CR 601.2h + CR 603.3b + CR 400.2: the same event shapes wait in the trigger
+    // collection carriers. A carrier whose trigger controller is not this viewer is
+    // cleared further down; the controller keeps it with only hidden-source payment
+    // entries blanked. The entry events deferred behind an entering choice
+    // (CR 614.12a) and a paused sacrifice batch's events (CR 701.21a) reach every viewer.
+    for event in filtered
+        .pending_trigger_event_batch
+        .iter_mut()
+        .chain(filtered.pending_attack_trigger_events.iter_mut())
+        .chain(filtered.deferred_entry_events.iter_mut())
+        .chain(
+            filtered
+                .consumed_before_priority_trigger_events
+                .iter_mut()
+                .map(|occurrence| &mut occurrence.event),
+        )
+        .chain(
+            filtered
+                .pending_trigger
+                .iter_mut()
+                .flat_map(|pending| pending.trigger_event.iter_mut()),
+        )
+        .chain(
+            filtered
+                .pending_player_scope_sacrifice_choice
+                .iter_mut()
+                .flat_map(|choice| choice.completion.deferred_events.iter_mut()),
+        )
+    {
+        redact_hidden_zone_change_event(event, &hidden_zone_change_ids);
+    }
+    for context in filtered.deferred_triggers.iter_mut().chain(
+        filtered
+            .pending_trigger_order
+            .iter_mut()
+            .flat_map(|order| order.groups.iter_mut())
+            .flat_map(|group| group.triggers.iter_mut()),
+    ) {
+        for event in context
+            .pending
+            .trigger_event
+            .iter_mut()
+            .chain(context.trigger_events.iter_mut())
+        {
+            redact_hidden_zone_change_event(event, &hidden_zone_change_ids);
+        }
+    }
+    match &mut filtered.waiting_for {
+        WaitingFor::TriggerTargetSelection {
+            trigger_event,
+            trigger_events,
+            ..
+        } => {
+            for event in trigger_event.iter_mut().chain(trigger_events.iter_mut()) {
+                redact_hidden_zone_change_event(event, &hidden_zone_change_ids);
+            }
+        }
+        WaitingFor::UnlessPayment {
+            trigger_event: Some(event),
+            ..
+        }
+        | WaitingFor::UnlessPaymentChooseCost {
+            trigger_event: Some(event),
+            ..
+        }
+        | WaitingFor::ChooseObjectsSelection {
+            trigger_event: Some(event),
+            ..
+        }
+        | WaitingFor::EachPlayerCopyChosenSelection {
+            trigger_event: Some(event),
+            ..
+        } => redact_hidden_zone_change_event(event, &hidden_zone_change_ids),
+        _ => {}
+    }
+    // CR 611.2a + CR 601.2h: an until-event effect latches its source's context, payment
+    // snapshots included. A read-only pass selects the effects naming a hidden source, so
+    // only those are taken mutably.
+    let latched_effects: Vec<usize> = filtered
+        .transient_continuous_effects
+        .iter()
+        .enumerate()
+        .filter(|(_, effect)| {
+            let crate::types::game_state::TransientContinuousEffect {
+                id: _,
+                source_id: _,
+                controller: _,
+                timestamp: _,
+                duration: _,
+                affected: _,
+                affected_recipient: _,
+                modifications: _,
+                condition: _,
+                duration_subject: _,
+                duration_event_source,
+                end_permission: _,
+                source_name: _,
+            } = effect;
+            duration_event_source.as_deref().is_some_and(|context| {
+                payment_names_hidden_source(
+                    &context.mana_spent_source_snapshots,
+                    &hidden_zone_change_ids,
+                )
+            })
+        })
+        .map(|(index, _)| index)
+        .collect();
+    for index in latched_effects {
+        if let Some(context) = filtered
+            .transient_continuous_effects
+            .get_mut(index)
+            .and_then(|effect| effect.duration_event_source.as_deref_mut())
+        {
+            redact_payment_source_snapshots(
+                &mut context.mana_spent_source_snapshots,
+                &hidden_zone_change_ids,
+            );
+        }
+    }
     // CR 400.2 + CR 401.2 + CR 603.7: a phase-delayed ability carries the
     // battlefield departure it was created under
     // (`SpellContext::creation_lookback_event`). That record names the departed
@@ -3619,12 +3738,22 @@ fn redact_hidden_zone_change_event(event: &mut GameEvent, hidden_ids: &HashSet<O
 /// rules decisions evaluated on authoritative state, never on the projection.
 ///
 /// Carriers covered: public `objects`; public departed stack spells (object and entry
-/// ability); the zone-change and sacrifice ledgers; the `ZoneChanged`, `CreatureExploited`
-/// and `SagaChapterAbilityResolved` events held as a stack or resolving entry's
-/// `trigger_event`, in `stack_trigger_event_batches`, `current_trigger_event(s)` and as a
-/// creation look-back event; and `ResolvedAbility::trigger_source` (with its sub/else
-/// chain) on stack and resolving entries and on delayed, pending, deferred and
-/// ordering triggers. Any other carrier is out of scope of this redaction.
+/// ability); the zone-change and sacrifice ledgers; a `Duration::UntilEvent` effect's
+/// `duration_event_source`; the `ZoneChanged`, `CreatureExploited` and
+/// `SagaChapterAbilityResolved` events held as a stack or resolving entry's
+/// `trigger_event`, in `stack_trigger_event_batches`, `current_trigger_event(s)`,
+/// `pending_trigger_event_batch`, `pending_attack_trigger_events`,
+/// `consumed_before_priority_trigger_events`, `deferred_entry_events`, a paused
+/// player-scope sacrifice's `deferred_events`, the pending trigger's `trigger_event`, a
+/// deferred or ordering trigger context's `trigger_event` and `trigger_events`, the
+/// `trigger_event` of the `TriggerTargetSelection` (with its `trigger_events`),
+/// `UnlessPayment`, `UnlessPaymentChooseCost`, `ChooseObjectsSelection` and
+/// `EachPlayerCopyChosenSelection` prompts, and as a creation look-back event; and
+/// `ResolvedAbility::trigger_source` (with its sub/else chain) on stack and resolving
+/// entries and on delayed, pending, deferred and ordering triggers. Any other carrier is
+/// out of scope of this redaction, including the `trigger_event` of an unless-payment
+/// resume nested in a `PendingManaAbility`, and a `ResolvedAbility` held by a prompt or
+/// paused batch (for example `UnlessPayment.pending_effect`).
 ///
 /// The wire census guard covers only the `mana_spent_source_snapshots` key;
 /// `cast_cost_paid_object` (`GameObject`, `TriggerSourceContext`,
@@ -4620,8 +4749,11 @@ mod tests {
     /// are seeded directly, including those the real-writer boards in
     /// tests/integration/issue_9377_hidden_identity_side_tables.rs cannot reach (sacrifice
     /// ledger, resolving entry, trigger-event batches, `SagaChapterAbilityResolved` and
-    /// `CreatureExploited` trigger events, delayed / pending / deferred / ordering triggers,
-    /// a departed entry's ability, sub-abilities). Creation look-back events are not seeded.
+    /// `CreatureExploited` trigger events, delayed / pending / deferred / ordering triggers
+    /// and their trigger events, the trigger-event queues and prompts, a paused sacrifice
+    /// batch, an until-event effect, a departed entry's ability, sub-abilities). The waiting
+    /// triggers are the opponent's, so the opponent's projection keeps their event carriers.
+    /// Creation look-back events are not seeded.
     #[test]
     fn public_carriers_blank_only_hidden_mana_source_payment_snapshots() {
         let mut state = GameState::new_two_player(42);
@@ -4731,14 +4863,24 @@ mod tests {
                 provenance: None,
             },
         };
+        // The opponent controls the waiting triggers, so their own projection keeps the
+        // trigger-collection event carriers that a non-controller has cleared.
         let pending = || {
-            crate::game::triggers::PendingTrigger::ordinary(
+            let mut pending = crate::game::triggers::PendingTrigger::ordinary(
                 paid,
-                owner,
+                opponent_id,
                 None,
                 Box::new(ability.clone()),
                 0,
-            )
+            );
+            pending.trigger_event = Some(event.clone());
+            pending
+        };
+        let all_events = vec![event.clone(), saga_event.clone(), exploit_event.clone()];
+        let context = || {
+            let mut context = crate::game::triggers::PendingTriggerContext::single(pending());
+            context.trigger_events = all_events.clone();
+            context
         };
         state.zone_changes_this_turn.push_back(record.clone());
         state
@@ -4782,21 +4924,69 @@ mod tests {
             true,
         ));
         state.pending_trigger = Some(Box::new(pending()));
-        state
-            .deferred_triggers
-            .push(crate::game::triggers::PendingTriggerContext::single(
-                pending(),
-            ));
+        state.deferred_triggers.push(context());
         state.pending_trigger_order = Some(PendingTriggerOrder {
             groups: vec![TriggerOrderGroup {
-                controller: owner,
-                triggers: vec![crate::game::triggers::PendingTriggerContext::single(
-                    pending(),
-                )],
+                controller: opponent_id,
+                triggers: vec![context()],
                 ordered: false,
             }],
             resume_after_ordering: None,
         });
+        state.pending_trigger_event_batch = all_events.clone();
+        state.pending_attack_trigger_events = all_events.clone();
+        state.deferred_entry_events = vec![event.clone()];
+        state.consumed_before_priority_trigger_events =
+            vec![crate::game::triggers::ConsumedTriggerEventOccurrence {
+                event: event.clone(),
+                occurrence: 0,
+                scope: Default::default(),
+            }];
+        state.pending_player_scope_sacrifice_choice = Some(
+            crate::types::game_state::PendingPlayerScopeSacrificeChoice {
+                ability: Box::new(ResolvedAbility::new(Effect::NoOp, Vec::new(), paid, owner)),
+                remaining_players: Vec::new(),
+                selections: Vec::new(),
+                completion: crate::types::game_state::PendingPlayerScopeSacrificeCompletion {
+                    deferred_events: all_events.clone(),
+                    ..Default::default()
+                },
+            },
+        );
+        state.waiting_for = WaitingFor::TriggerTargetSelection {
+            player: opponent_id,
+            trigger_controller: Some(opponent_id),
+            trigger_event: Some(event.clone()),
+            trigger_events: all_events.clone(),
+            target_slots: Vec::new(),
+            mode_labels: Vec::new(),
+            target_constraints: Vec::new(),
+            selection: crate::types::game_state::TargetSelectionProgress::default(),
+            source_id: Some(paid),
+            description: None,
+        };
+        // CR 611.2a: an until-event effect latches its source's context when created.
+        state.transient_continuous_effects.push_back(
+            crate::types::game_state::TransientContinuousEffect {
+                id: 1,
+                source_id: paid,
+                controller: owner,
+                timestamp: 1,
+                duration: crate::types::ability::Duration::UntilEvent {
+                    event: Box::new(crate::types::ability::TriggerDefinition::new(
+                        crate::types::triggers::TriggerMode::ChangesZone,
+                    )),
+                },
+                affected: TargetFilter::SelfRef,
+                affected_recipient: None,
+                modifications: Vec::new(),
+                condition: None,
+                duration_subject: None,
+                duration_event_source: record.trigger_source_context.clone().map(Box::new),
+                end_permission: None,
+                source_name: "Paid Permanent".to_string(),
+            },
+        );
         let departed_object = state.objects[&departed].clone();
         let departed_spell = |ability: ResolvedAbility, object: GameObject| DepartedStackSpell {
             entry: StackEntry {
@@ -4935,6 +5125,99 @@ mod tests {
                     }
                 }
             }
+            if let Some(event) = state
+                .pending_trigger
+                .as_ref()
+                .and_then(|pending| pending.trigger_event.as_ref())
+            {
+                push("pending_trigger trigger_event", &from_event(event));
+            }
+            let order_contexts = state
+                .pending_trigger_order
+                .iter()
+                .flat_map(|order| order.groups.iter())
+                .flat_map(|group| group.triggers.iter());
+            for (label, context) in state
+                .deferred_triggers
+                .iter()
+                .map(|context| ("deferred_triggers", context))
+                .chain(order_contexts.map(|context| ("pending_trigger_order", context)))
+            {
+                if let Some(event) = context.pending.trigger_event.as_ref() {
+                    push(&format!("{label} trigger_event"), &from_event(event));
+                }
+                for event in &context.trigger_events {
+                    push(&format!("{label} trigger_events"), &from_event(event));
+                }
+            }
+            for (label, events) in [
+                (
+                    "pending_trigger_event_batch",
+                    &state.pending_trigger_event_batch,
+                ),
+                (
+                    "pending_attack_trigger_events",
+                    &state.pending_attack_trigger_events,
+                ),
+                ("deferred_entry_events", &state.deferred_entry_events),
+            ] {
+                for event in events {
+                    push(label, &from_event(event));
+                }
+            }
+            for occurrence in &state.consumed_before_priority_trigger_events {
+                push(
+                    "consumed_before_priority_trigger_events",
+                    &from_event(&occurrence.event),
+                );
+            }
+            if let Some(choice) = state.pending_player_scope_sacrifice_choice.as_ref() {
+                for event in &choice.completion.deferred_events {
+                    push("pending_player_scope_sacrifice_choice", &from_event(event));
+                }
+            }
+            match &state.waiting_for {
+                WaitingFor::TriggerTargetSelection {
+                    trigger_event,
+                    trigger_events,
+                    ..
+                } => {
+                    for event in trigger_event.iter() {
+                        push("TriggerTargetSelection trigger_event", &from_event(event));
+                    }
+                    for event in trigger_events {
+                        push("TriggerTargetSelection trigger_events", &from_event(event));
+                    }
+                }
+                WaitingFor::UnlessPayment {
+                    trigger_event: Some(event),
+                    ..
+                } => push("UnlessPayment trigger_event", &from_event(event)),
+                WaitingFor::UnlessPaymentChooseCost {
+                    trigger_event: Some(event),
+                    ..
+                } => push("UnlessPaymentChooseCost trigger_event", &from_event(event)),
+                WaitingFor::ChooseObjectsSelection {
+                    trigger_event: Some(event),
+                    ..
+                } => push("ChooseObjectsSelection trigger_event", &from_event(event)),
+                WaitingFor::EachPlayerCopyChosenSelection {
+                    trigger_event: Some(event),
+                    ..
+                } => push(
+                    "EachPlayerCopyChosenSelection trigger_event",
+                    &from_event(event),
+                ),
+                _ => {}
+            }
+            for effect in &state.transient_continuous_effects {
+                if let Some(context) = effect.duration_event_source.as_deref() {
+                    push(
+                        "transient_continuous_effects duration_event_source",
+                        &context.mana_spent_source_snapshots,
+                    );
+                }
+            }
             for (_, incarnations) in state.departed_stack_spells.iter() {
                 for (incarnation, spell) in incarnations.iter() {
                     if !spell.object.mana_spent_source_snapshots.is_empty() {
@@ -4983,6 +5266,21 @@ mod tests {
             "pending_trigger",
             "deferred_triggers",
             "pending_trigger_order",
+            // Trigger-collection event carriers, kept by their controller (the opponent).
+            "pending_trigger trigger_event",
+            "deferred_triggers trigger_event",
+            "deferred_triggers trigger_events",
+            "pending_trigger_order trigger_event",
+            "pending_trigger_order trigger_events",
+            "pending_trigger_event_batch",
+            "TriggerTargetSelection trigger_event",
+            "TriggerTargetSelection trigger_events",
+            // Event queues and the until-event effect that every viewer keeps.
+            "pending_attack_trigger_events",
+            "consumed_before_priority_trigger_events",
+            "deferred_entry_events",
+            "pending_player_scope_sacrifice_choice",
+            "transient_continuous_effects duration_event_source",
             "departed 1 object",
             "departed 1 entry ability",
             "departed 1 entry sub_ability",
@@ -5038,6 +5336,90 @@ mod tests {
             raw,
             "authoritative state is untouched by the projection"
         );
+
+        // The other prompts that hold a trigger event reach every viewer; each is seeded
+        // alone because `waiting_for` holds one prompt.
+        let pending_effect =
+            || Box::new(ResolvedAbility::new(Effect::NoOp, Vec::new(), paid, owner));
+        let prompts = [
+            (
+                "UnlessPayment trigger_event",
+                WaitingFor::UnlessPayment {
+                    player: opponent_id,
+                    cost: AbilityCost::PayLife {
+                        amount: QuantityExpr::Fixed { value: 2 },
+                    },
+                    pending_effect: pending_effect(),
+                    trigger_event: Some(event.clone()),
+                    effect_description: None,
+                    remaining: Vec::new(),
+                },
+            ),
+            (
+                "UnlessPaymentChooseCost trigger_event",
+                WaitingFor::UnlessPaymentChooseCost {
+                    player: opponent_id,
+                    costs: Vec::new(),
+                    pending_effect: pending_effect(),
+                    trigger_event: Some(event.clone()),
+                    effect_description: None,
+                    remaining_choices: Vec::new(),
+                    chosen: Vec::new(),
+                },
+            ),
+            (
+                "ChooseObjectsSelection trigger_event",
+                WaitingFor::ChooseObjectsSelection {
+                    player: opponent_id,
+                    eligible: Vec::new(),
+                    min: 0,
+                    max: None,
+                    trigger_event: Some(event.clone()),
+                },
+            ),
+            (
+                "EachPlayerCopyChosenSelection trigger_event",
+                WaitingFor::EachPlayerCopyChosenSelection {
+                    player: opponent_id,
+                    eligible: Vec::new(),
+                    min: 0,
+                    max: 1,
+                    choose_filter: TargetFilter::Any,
+                    copy_modifications: Vec::new(),
+                    scale: None,
+                    choose_scope: Default::default(),
+                    source_id: paid,
+                    source_controller: owner,
+                    remaining_players: Vec::new(),
+                    all_choices: Vec::new(),
+                    scoped_players: Vec::new(),
+                    trigger_event: Some(event.clone()),
+                },
+            ),
+        ];
+        for (label, prompt) in prompts {
+            let mut prompted = state.clone();
+            prompted.waiting_for = prompt;
+            assert!(
+                carriers(&prompted)
+                    .iter()
+                    .any(|(carrier, carried)| carrier == label && carried == &payment),
+                "reach-guard: the raw `{label}` names both sources"
+            );
+            let projected = carriers(&filter_state_for_viewer(&prompted, opponent_id));
+            let Some((_, carried)) = projected.iter().find(|(carrier, _)| carrier == label) else {
+                panic!("the public `{label}` carrier is kept");
+            };
+            assert_eq!(carried[0].source_id, hidden_source, "{label}: id kept");
+            assert_eq!(
+                carried[0].lki.name, HIDDEN_CARD_NAME,
+                "{label}: the hidden mana source is blanked"
+            );
+            assert_eq!(
+                carried[1], payment[1],
+                "{label}: the visible mana source's entry is kept"
+            );
+        }
     }
 
     /// CR 702.110b + CR 400.2: a `CreatureExploited` record whose sacrificed victim is now
