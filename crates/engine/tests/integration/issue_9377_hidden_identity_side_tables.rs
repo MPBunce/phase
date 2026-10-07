@@ -1895,16 +1895,21 @@ type RequiredPath<'a> = (&'a str, &'a dyn Fn(&str) -> bool);
 
 /// Census H2: walk every `mana_spent_source_snapshots` array, at any depth, in
 /// the raw state and in each viewer wire form, and require the hidden Island
-/// to be blanked everywhere and the visible Forest kept everywhere.
+/// to be blanked everywhere, each visible source kept under its name
+/// everywhere, and every entry not naming the hidden Island equal to its raw
+/// JSON (no over-redaction).
 fn assert_payment_census(
     raw: &GameState,
-    forest: ObjectId,
     island: ObjectId,
+    visible: &[(ObjectId, &str)],
     required: &[RequiredPath<'_>],
     label: &str,
 ) {
     let island_id = serde_json::to_value(island).expect("id serializes");
-    let forest_id = serde_json::to_value(forest).expect("id serializes");
+    let visible_ids: Vec<(serde_json::Value, &str)> = visible
+        .iter()
+        .map(|(id, name)| (serde_json::to_value(id).expect("id serializes"), *name))
+        .collect();
     let raw_paths = payment_paths(&serde_json::to_value(raw).expect("raw state serializes"));
     let raw_list: Vec<&String> = raw_paths.iter().map(|(path, _)| path).collect();
     for (name, matches) in required {
@@ -1945,8 +1950,11 @@ fn assert_payment_census(
         }
         for (raw_path, raw_items) in &raw_paths {
             let raw_island = items_from(raw_items, &island_id).count();
-            let raw_forest = items_from(raw_items, &forest_id).count();
-            if raw_island + raw_forest == 0 {
+            let raw_visible: usize = visible_ids
+                .iter()
+                .map(|(id, _)| items_from(raw_items, id).count())
+                .sum();
+            if raw_island + raw_visible == 0 {
                 continue;
             }
             let Some((_, items)) = paths
@@ -1972,14 +1980,28 @@ fn assert_payment_census(
                 raw_island,
                 "{label}/{view_label}: `{raw_path}` island entries"
             );
-            let forest_items: Vec<_> = items_from(items, &forest_id).collect();
-            assert_eq!(forest_items.len(), raw_forest, "{label}/{view_label}");
-            for item in forest_items {
+            for (visible_id, name) in &visible_ids {
+                let visible_items: Vec<_> = items_from(items, visible_id).collect();
                 assert_eq!(
-                    snapshot_name(item),
-                    Some("Forest"),
-                    "{label}/{view_label}: `{raw_path}` lost the visible Forest"
+                    visible_items.len(),
+                    items_from(raw_items, visible_id).count(),
+                    "{label}/{view_label}: `{raw_path}` {name} entries"
                 );
+                for item in visible_items {
+                    assert_eq!(
+                        snapshot_name(item),
+                        Some(*name),
+                        "{label}/{view_label}: `{raw_path}` lost the visible {name}"
+                    );
+                }
+            }
+            for (raw_item, item) in raw_items.iter().zip(items) {
+                if raw_item.get("source_id") != Some(&island_id) {
+                    assert_eq!(
+                        item, raw_item,
+                        "{label}/{view_label}: `{raw_path}` over-redacted a visible entry"
+                    );
+                }
             }
         }
     }
@@ -2001,8 +2023,8 @@ fn payment_snapshot_census_blanks_hidden_source_in_every_wire_form() {
         |path: &str| path.starts_with("/stack/") && path.contains("/trigger_event/");
     assert_payment_census(
         runner.state(),
-        forest,
         island,
+        &[(forest, "Forest")],
         &[
             ("objects[visionary]", &object_path),
             ("zone_changes_this_turn", &journal_path),
@@ -2024,13 +2046,43 @@ fn payment_snapshot_census_blanks_hidden_source_in_every_wire_form() {
     // conditionally.
     assert_payment_census(
         runner.state(),
-        forest,
         island,
+        &[(forest, "Forest")],
         &[
             ("departed_stack_spells[bears].object", &departed_object_path),
             ("zone_changes_this_turn", &journal_path),
         ],
         "sub-case B",
+    );
+
+    // Sub-case C: board H6 at the unanswered unless-payment prompt. The
+    // visible same-name island_b and the four Forests must survive unchanged.
+    let Some(TitanTaxBoard {
+        runner,
+        titan,
+        forests,
+        island_a,
+        island_b,
+    }) = frost_titan_tax_prompt_after_island_bounced()
+    else {
+        return;
+    };
+    let titan_path = format!("/objects/{}/mana_spent_source_snapshots", titan.0);
+    let titan_object_path = |path: &str| path == titan_path;
+    let prompt_path =
+        |path: &str| path.starts_with("/waiting_for/") && path.contains("/pending_effect/");
+    let mut visible: Vec<(ObjectId, &str)> = forests.iter().map(|id| (*id, "Forest")).collect();
+    visible.push((island_b, "Island"));
+    assert_payment_census(
+        runner.state(),
+        island_a,
+        &visible,
+        &[
+            ("objects[titan]", &titan_object_path),
+            ("zone_changes_this_turn", &journal_path),
+            ("waiting_for pending_effect", &prompt_path),
+        ],
+        "sub-case C",
     );
 }
 
@@ -2107,5 +2159,341 @@ fn sacrifice_record_blanks_hidden_mana_source() {
         record_payment(&sacrifice_named(&p0, bears).expect("owner record")),
         record_payment(&raw_record),
         "the owner keeps the sacrifice record's payment"
+    );
+}
+
+/// Board H6 (also census sub-case C): Frost Titan, paid by four real Forests and
+/// two real Islands, resolves and taps P1's Grizzly Bears with its enters
+/// trigger; Capsize returns one Island (`island_a`) to P0's hand while the other
+/// (`island_b`) stays on the battlefield. P1 then casts Lightning Bolt at the
+/// Titan, and the Titan's "counter that spell or ability unless its controller
+/// pays {2}" trigger resolves into the unless-payment prompt (CR 118.12a), which
+/// is left unanswered.
+struct TitanTaxBoard {
+    runner: GameRunner,
+    titan: ObjectId,
+    forests: Vec<ObjectId>,
+    island_a: ObjectId,
+    island_b: ObjectId,
+}
+
+fn frost_titan_tax_prompt_after_island_bounced() -> Option<TitanTaxBoard> {
+    let db = load_db()?;
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let forests: Vec<ObjectId> = (0..4)
+        .map(|_| scenario.add_real_card(P0, "Forest", Zone::Battlefield, db))
+        .collect();
+    let island_a = scenario.add_real_card(P0, "Island", Zone::Battlefield, db);
+    let island_b = scenario.add_real_card(P0, "Island", Zone::Battlefield, db);
+    let titan = scenario.add_real_card(P0, "Frost Titan", Zone::Hand, db);
+    let capsize = scenario.add_real_card(P0, "Capsize", Zone::Hand, db);
+    let bears = scenario.add_real_card(P1, "Grizzly Bears", Zone::Battlefield, db);
+    let bolt = scenario.add_real_card(P1, "Lightning Bolt", Zone::Hand, db);
+    let mut runner = scenario.build();
+    engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
+
+    // {4}{U}{U}: six real units, one per land, so the Titan's payment vector has
+    // one entry per land.
+    let mut lands = forests.clone();
+    lands.extend([island_a, island_b]);
+    activate_lands(&mut runner, &lands);
+    commit_cast(&mut runner, titan, None);
+    for _ in 0..6 {
+        if matches!(
+            runner.state().waiting_for,
+            WaitingFor::TriggerTargetSelection { .. }
+        ) {
+            break;
+        }
+        pass(&mut runner);
+    }
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::TriggerTargetSelection { .. }
+        ),
+        "reach-guard: the Titan's enters trigger asks for its target: {:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(bears)),
+        })
+        .expect("target Grizzly Bears");
+    for _ in 0..6 {
+        let state = runner.state();
+        if state.stack.is_empty()
+            && matches!(state.waiting_for, WaitingFor::Priority { player } if player == P0)
+        {
+            break;
+        }
+        pass(&mut runner);
+    }
+    let state = runner.state();
+    assert_eq!(
+        state.objects[&titan].zone,
+        Zone::Battlefield,
+        "reach-guard: the Titan resolved"
+    );
+    assert!(
+        state.objects[&bears].tapped,
+        "reach-guard: the enters trigger resolved"
+    );
+    assert!(state.stack.is_empty(), "reach-guard: the stack settled");
+    assert_priority(state, P0, "reach-guard: P0 holds priority after the Titan");
+
+    fund(&mut runner, P0, &[(ManaType::Blue, 3)]);
+    commit_cast(&mut runner, capsize, Some(TargetRef::Object(island_a)));
+    settle(&mut runner);
+    let state = runner.state();
+    assert_eq!(
+        state.objects[&island_a].zone,
+        Zone::Hand,
+        "reach-guard: island_a bounced"
+    );
+    assert_eq!(
+        state.objects[&island_b].zone,
+        Zone::Battlefield,
+        "reach-guard: island_b stays public"
+    );
+    assert!(state.stack.is_empty(), "reach-guard: Capsize resolved");
+    assert_priority(state, P0, "reach-guard: P0 holds priority after Capsize");
+
+    pass(&mut runner);
+    assert_priority(runner.state(), P1, "reach-guard: P1 receives priority");
+    // Bolt's {R} plus the {2} tax, as in the issue #9282 Frost Titan precedent.
+    fund(
+        &mut runner,
+        P1,
+        &[(ManaType::Red, 1), (ManaType::Colorless, 2)],
+    );
+    commit_cast(&mut runner, bolt, Some(TargetRef::Object(titan)));
+    for _ in 0..6 {
+        if matches!(runner.state().waiting_for, WaitingFor::UnlessPayment { .. }) {
+            break;
+        }
+        pass(&mut runner);
+    }
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::UnlessPayment { .. }),
+        "reach-guard: the Titan's tax trigger reached its unless-payment prompt: {:?}",
+        runner.state().waiting_for
+    );
+    Some(TitanTaxBoard {
+        runner,
+        titan,
+        forests,
+        island_a,
+        island_b,
+    })
+}
+
+/// The payment vector latched by the unless-payment prompt's retained ability.
+fn prompt_payment(state: &GameState) -> &[ManaSpentSourceSnapshot] {
+    let WaitingFor::UnlessPayment { pending_effect, .. } = &state.waiting_for else {
+        panic!("expected UnlessPayment, got {:?}", state.waiting_for);
+    };
+    &pending_effect
+        .trigger_source
+        .as_ref()
+        .expect("the tax trigger latched its source context")
+        .mana_spent_source_snapshots
+}
+
+/// Only the hidden source's entry is blanked: same length, ids and order; the
+/// hidden entry loses its identity; every other entry equals the raw entry.
+fn assert_only_hidden_blanked(
+    raw: &[ManaSpentSourceSnapshot],
+    view: &[ManaSpentSourceSnapshot],
+    hidden: ObjectId,
+    label: &str,
+) {
+    assert!(
+        raw.iter().any(|s| s.source_id == hidden),
+        "{label}: reach-guard: the raw vector names the hidden source"
+    );
+    assert_eq!(view.len(), raw.len(), "{label}: payment vector length kept");
+    assert_eq!(
+        view.iter().map(|s| s.source_id).collect::<Vec<_>>(),
+        raw.iter().map(|s| s.source_id).collect::<Vec<_>>(),
+        "{label}: source ids and order kept"
+    );
+    for (raw_entry, entry) in raw.iter().zip(view) {
+        if raw_entry.source_id == hidden {
+            assert_eq!(
+                entry.lki.name, HIDDEN,
+                "{label}: the hidden mana source is still named"
+            );
+            assert!(entry.lki.card_types.is_empty(), "{label}: types");
+            assert!(entry.lki.subtypes.is_empty(), "{label}: subtypes");
+            assert!(entry.lki.supertypes.is_empty(), "{label}: supertypes");
+        } else {
+            assert_eq!(
+                entry, raw_entry,
+                "{label}: a visible source's entry is kept"
+            );
+        }
+    }
+}
+
+/// Test H6: CR 118.12a + CR 601.2h + CR 113.7a + CR 400.2: the unless-payment
+/// prompt of Frost Titan's tax trigger retains the trigger's resolved ability,
+/// whose latched source context clones the Titan's payment snapshots. After a
+/// paying Island returned to its owner's hand, the opponent, a spectator and the
+/// opponent's client wire see that Island's entry blanked inside the prompt,
+/// while the visible same-name Island and the Forests stay named, the public
+/// prompt spine is unchanged, and the owner and the authoritative state keep the
+/// full vector.
+#[test]
+fn frost_titan_tax_prompt_blanks_hidden_mana_source() {
+    let Some(TitanTaxBoard {
+        mut runner,
+        titan,
+        forests,
+        island_a,
+        island_b,
+    }) = frost_titan_tax_prompt_after_island_bounced()
+    else {
+        return;
+    };
+    let raw = runner.state().clone();
+
+    // Raw reach-guards, before any negative assertion.
+    let titan_payment = &raw.objects[&titan].mana_spent_source_snapshots;
+    let mut expected_sources = forests.clone();
+    expected_sources.extend([island_a, island_b]);
+    expected_sources.sort();
+    let mut paid_sources: Vec<ObjectId> = titan_payment.iter().map(|s| s.source_id).collect();
+    paid_sources.sort();
+    assert_eq!(
+        paid_sources, expected_sources,
+        "reach-guard: the Titan's vector has one entry per paying land"
+    );
+    let island_entry = snapshot_of(titan_payment, island_a);
+    assert_eq!(island_entry.lki.name, "Island", "reach-guard");
+    assert!(
+        island_entry.lki.card_types.contains(&CoreType::Land),
+        "reach-guard"
+    );
+    let WaitingFor::UnlessPayment {
+        player,
+        cost,
+        pending_effect,
+        trigger_event,
+        effect_description,
+        remaining,
+    } = &raw.waiting_for
+    else {
+        panic!("reach-guard: expected UnlessPayment");
+    };
+    assert_eq!(*player, P1, "reach-guard: the Bolt's controller pays");
+    assert_eq!(pending_effect.source_id, titan, "reach-guard");
+    let raw_payment = prompt_payment(&raw).to_vec();
+    assert_eq!(
+        &raw_payment, titan_payment,
+        "reach-guard: the prompt's ability latched the Titan's payment"
+    );
+    assert_eq!(snapshot_of(&raw_payment, island_a).lki.name, "Island");
+    assert_eq!(snapshot_of(&raw_payment, island_b).lki.name, "Island");
+    assert_eq!(raw.objects[&island_a].zone, Zone::Hand, "reach-guard");
+    let raw_json = serde_json::to_value(&raw).expect("raw state serializes");
+    let island_a_id = serde_json::to_value(island_a).expect("id serializes");
+    assert!(
+        payment_paths(&raw_json).iter().any(|(path, items)| {
+            path.contains("/waiting_for/")
+                && path.contains("/pending_effect/")
+                && items_from(items, &island_a_id).any(|i| snapshot_name(i) == Some("Island"))
+        }),
+        "reach-guard: a raw waiting_for pending_effect path names island_a"
+    );
+
+    for (label, view) in [
+        ("P1", filter_state_for_viewer(&raw, P1)),
+        ("spectator", filter_state_for_unseated_viewer(&raw)),
+    ] {
+        assert_eq!(
+            view.objects[&island_a].name, HIDDEN,
+            "reach-guard ({label}): island_a is hidden"
+        );
+        assert_eq!(
+            view.objects[&island_b].name, "Island",
+            "reach-guard ({label}): the same-name island_b is visible"
+        );
+        assert_only_hidden_blanked(
+            &raw_payment,
+            prompt_payment(&view),
+            island_a,
+            &format!("{label} UnlessPayment pending_effect"),
+        );
+        let WaitingFor::UnlessPayment {
+            player: view_player,
+            cost: view_cost,
+            pending_effect: view_effect,
+            trigger_event: view_event,
+            effect_description: view_description,
+            remaining: view_remaining,
+        } = &view.waiting_for
+        else {
+            panic!("{label}: the prompt is still UnlessPayment");
+        };
+        assert_eq!(view_player, player, "{label}: payer kept");
+        assert_eq!(view_cost, cost, "{label}: cost kept");
+        assert_eq!(view_event, trigger_event, "{label}: trigger event kept");
+        assert_eq!(
+            view_description, effect_description,
+            "{label}: description kept"
+        );
+        assert_eq!(view_remaining, remaining, "{label}: remaining kept");
+        assert_eq!(view_effect.source_id, pending_effect.source_id, "{label}");
+        assert_eq!(view_effect.controller, pending_effect.controller, "{label}");
+        assert_eq!(view_effect.effect, pending_effect.effect, "{label}");
+        assert_eq!(
+            view_effect.description, pending_effect.description,
+            "{label}"
+        );
+        assert_eq!(view_effect.targets, pending_effect.targets, "{label}");
+    }
+
+    let wire = serde_json::to_value(ClientGameStateRef::wrap(&raw, Some(P1)))
+        .expect("client wire serializes");
+    let wire_paths = payment_paths(&wire);
+    assert!(
+        wire_paths
+            .iter()
+            .any(|(path, _)| path.contains("/waiting_for/") && path.contains("/pending_effect/")),
+        "reach-guard: the client wire carries the prompt's payment vector"
+    );
+    for (path, items) in &wire_paths {
+        for item in items_from(items, &island_a_id) {
+            assert_eq!(
+                snapshot_name(item),
+                Some(HIDDEN),
+                "client wire P1: `{path}` still names island_a"
+            );
+        }
+    }
+
+    let p0 = filter_state_for_viewer(&raw, P0);
+    assert_eq!(p0.objects[&island_a].name, "Island", "owner sees own hand");
+    assert_eq!(
+        prompt_payment(&p0),
+        raw_payment.as_slice(),
+        "the owner keeps the prompt's full payment vector"
+    );
+
+    // Authority: projection edits only the clone, and the live prompt still resolves.
+    assert_eq!(
+        prompt_payment(runner.state()),
+        raw_payment.as_slice(),
+        "authoritative prompt is untouched by the projections"
+    );
+    runner
+        .act(GameAction::PayUnlessCost { pay: true })
+        .expect("P1 pays the {2} tax");
+    assert!(
+        !matches!(runner.state().waiting_for, WaitingFor::UnlessPayment { .. }),
+        "the authoritative prompt resolved: {:?}",
+        runner.state().waiting_for
     );
 }

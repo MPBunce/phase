@@ -3013,6 +3013,13 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
 
     redact_hidden_library_identity_carriers(&mut filtered, &hidden_library_ids);
 
+    // CR 601.2h + CR 113.7a + CR 400.2: prompt-held and root-held paused abilities latch
+    // their source's payment snapshots too. This runs after every `waiting_for` rebuild
+    // above (`PayCost`, `CostTypeChoice`, ...), which re-clone the authoritative prompt and
+    // would otherwise restore an unredacted ability.
+    redact_waiting_for_payment(&mut filtered.waiting_for, &hidden_zone_change_ids);
+    redact_paused_ability_payment(&mut filtered, &hidden_zone_change_ids);
+
     // This is the single display-identity authority sent to every client. The
     // preceding projection/redaction passes decide whether an object's identity
     // remains available; UI code consumes this result rather than recreating
@@ -3750,14 +3757,37 @@ fn redact_hidden_zone_change_event(event: &mut GameEvent, hidden_ids: &HashSet<O
 /// `UnlessPayment`, `UnlessPaymentChooseCost`, `ChooseObjectsSelection` and
 /// `EachPlayerCopyChosenSelection` prompts, and as a creation look-back event; and
 /// `ResolvedAbility::trigger_source` (with its sub/else chain) on stack and resolving
-/// entries and on delayed, pending, deferred and ordering triggers. Any other carrier is
-/// out of scope of this redaction, including the `trigger_event` of an unless-payment
-/// resume nested in a `PendingManaAbility`, and a `ResolvedAbility` held by a prompt or
-/// paused batch (for example `UnlessPayment.pending_effect`).
+/// entries and on delayed, pending, deferred and ordering triggers; plus every retained
+/// `ResolvedAbility` or `PendingManaAbility` reachable by a viewer: the
+/// `pending_effect`/`ability`/`pending_ability` of the prompts that hold one
+/// (`UnlessPayment`, `UnlessPaymentChooseCost`, `WardDiscardChoice`,
+/// `WardSacrificeChoice`, `UnlessBounceChoice`, `ExploreChoice`, `ReturnAsAuraTarget`,
+/// `MoveCountersDistribution`, `RemoveCountersChoice`, `MultiTargetSelection`,
+/// `RepeatDecision`, `ClashChooseOpponent`, `ChooseFromZoneOpponentChooser`), the
+/// `PendingCast` of `pending_cast` and of casting prompts, the `PendingManaAbility`
+/// `resume`/`cost_move_resume` (and the `trigger_event` of an unless-payment resume) held
+/// by `PayManaAbilityMana`, `PayAmountChoice`, `PayCost`, `CollectEvidenceChoice` and
+/// `ChooseManaColor`, `ManaChoiceContext::ResolvingEffect`, `CollectEvidenceResume::Effect`,
+/// and the roots `pending_player_scope_sacrifice_choice`,
+/// `pending_player_scope_unless_payment`, `pending_scoped_library_search`,
+/// `pending_library_search_delivery`, `epic_effects` and the prevention rider
+/// (`runtime_execute`) of `pending_damage_replacements` and object replacement
+/// definitions (`redact_waiting_for_payment`, `redact_paused_ability_payment`). Applied
+/// after every `WaitingFor` rebuild so no rebuild re-clones an unredacted prompt.
 ///
-/// The wire census guard covers only the `mana_spent_source_snapshots` key;
-/// `cast_cost_paid_object` (`GameObject`, `TriggerSourceContext`,
-/// `PendingManaAbility.cost_paid_object`) is a known sibling not covered here.
+/// Not carriers because no viewer receives them: `pending_cost_move_resume`,
+/// `pending_deferred_life_cost_resume`, `pending_triggered_mana_resume`,
+/// `pending_discard_batch`, `resolution_stack` and the other private resume cursors
+/// cleared above, `payment_transaction` (`None` in every projection); not serialized:
+/// `pending_discard_for_cost`, `resolving_player_scope_linked_exile`.
+///
+/// Out of scope: the `cast_cost_paid_object` family (`GameObject`, `TriggerSourceContext`,
+/// `PendingManaAbility.cost_paid_object`, `SpellContext.cost_paid_object(s)`/
+/// `effect_context_object`/`amassed_army_object`), a different payload
+/// (`CostPaidObjectSnapshot`) and writer set; event carriers outside the loops above;
+/// raw-event transport; stable-id tracking and `proposer_hidden_view` (#9377 section 1).
+///
+/// The wire census guard covers only the `mana_spent_source_snapshots` key.
 fn redact_payment_source_snapshots(
     snapshots: &mut [crate::types::game_state::ManaSpentSourceSnapshot],
     hidden_ids: &HashSet<ObjectId>,
@@ -3822,6 +3852,339 @@ fn ability_payment_names_hidden_source(
         || ability.else_ability.as_deref().is_some_and(|else_ability| {
             ability_payment_names_hidden_source(else_ability, hidden_ids)
         })
+}
+
+/// A paused cast keeps its spell ability; blank only its hidden-source payment entries.
+fn redact_pending_cast_payment(
+    pending: &mut crate::types::game_state::PendingCast,
+    hidden_ids: &HashSet<ObjectId>,
+) {
+    redact_ability_payment(&mut pending.ability, hidden_ids);
+}
+
+/// A paused mana ability keeps the ability it pays for in its resume cursors. Its
+/// `cost_paid_object` is the out-of-scope `CostPaidObjectSnapshot` sibling (see
+/// `redact_payment_source_snapshots`).
+fn redact_pending_mana_ability_payment(
+    pending: &mut crate::types::game_state::PendingManaAbility,
+    hidden_ids: &HashSet<ObjectId>,
+) {
+    redact_mana_ability_resume_payment(&mut pending.resume, hidden_ids);
+    if let Some(resume) = pending.cost_move_resume.as_mut() {
+        redact_mana_ability_resume_payment(resume, hidden_ids);
+    }
+}
+
+/// CR 118.12a + CR 605.3b: an unless-payment (or effect cost) paid through a mana ability
+/// that paused keeps the paused ability, and an unless-payment keeps its trigger event.
+fn redact_mana_ability_resume_payment(
+    resume: &mut crate::types::game_state::ManaAbilityResume,
+    hidden_ids: &HashSet<ObjectId>,
+) {
+    use crate::types::game_state::ManaAbilityResume;
+    match resume {
+        ManaAbilityResume::UnlessPayment {
+            pending_effect,
+            trigger_event,
+            ..
+        } => {
+            redact_ability_payment(pending_effect, hidden_ids);
+            if let Some(event) = trigger_event.as_mut() {
+                redact_hidden_zone_change_event(event, hidden_ids);
+            }
+        }
+        ManaAbilityResume::EffectPayCost { ability, .. } => {
+            redact_ability_payment(ability, hidden_ids);
+        }
+        // Keep this complete rather than using a catch-all: a new resume must decide
+        // whether it retains an ability. None of these holds one.
+        ManaAbilityResume::Priority
+        | ManaAbilityResume::CompanionToHand { .. }
+        | ManaAbilityResume::TurnFaceUp { .. }
+        | ManaAbilityResume::EndContinuousEffect { .. }
+        | ManaAbilityResume::ManaPayment { .. }
+        | ManaAbilityResume::ManaSourceSelection { .. }
+        | ManaAbilityResume::PhyrexianCastPayment { .. }
+        | ManaAbilityResume::FinalizePendingManaPayment { .. } => {}
+    }
+}
+
+/// A mana color choice keeps either the paused mana ability or the resolving ability.
+fn redact_mana_choice_context_payment(
+    context: &mut crate::types::game_state::ManaChoiceContext,
+    hidden_ids: &HashSet<ObjectId>,
+) {
+    use crate::types::game_state::ManaChoiceContext;
+    match context {
+        ManaChoiceContext::ManaAbility(pending) => {
+            redact_pending_mana_ability_payment(pending, hidden_ids);
+        }
+        ManaChoiceContext::ResolvingEffect(ability) => redact_ability_payment(ability, hidden_ids),
+    }
+}
+
+/// CR 601.2h + CR 113.7a + CR 400.2: a prompt that pauses a resolving or casting ability
+/// retains that ability, including the payment snapshots its `trigger_source` latched.
+/// The prompt reaches every viewer, so a hidden mana source's entry is blanked there; the
+/// public ability spine (source, controller, effect, targets, description) is kept. The
+/// authoritative prompt keeps the full ability for resolution (CR 608.2h).
+///
+/// Keep this complete rather than using a catch-all: new pause states must explicitly
+/// decide whether they retain an ability.
+fn redact_waiting_for_payment(waiting_for: &mut WaitingFor, hidden_ids: &HashSet<ObjectId>) {
+    use crate::types::game_state::{CollectEvidenceResume, CostResume};
+    // Every casting prompt that holds a `PendingCast` (including a `PayCost` spell resume
+    // and a casting `CollectEvidenceChoice`); listed below as handled.
+    if let Some(pending) = waiting_for.pending_cast_mut() {
+        redact_pending_cast_payment(pending, hidden_ids);
+    }
+    match waiting_for {
+        WaitingFor::UnlessPayment { pending_effect, .. }
+        | WaitingFor::UnlessPaymentChooseCost { pending_effect, .. }
+        | WaitingFor::WardDiscardChoice { pending_effect, .. }
+        | WaitingFor::WardSacrificeChoice { pending_effect, .. }
+        | WaitingFor::UnlessBounceChoice { pending_effect, .. }
+        | WaitingFor::ExploreChoice { pending_effect, .. }
+        | WaitingFor::ReturnAsAuraTarget { pending_effect, .. }
+        | WaitingFor::MoveCountersDistribution { pending_effect, .. }
+        | WaitingFor::RemoveCountersChoice { pending_effect, .. } => {
+            redact_ability_payment(pending_effect, hidden_ids);
+        }
+        WaitingFor::MultiTargetSelection {
+            pending_ability, ..
+        } => redact_ability_payment(pending_ability, hidden_ids),
+        WaitingFor::RepeatDecision { ability, .. }
+        | WaitingFor::ClashChooseOpponent { ability, .. }
+        | WaitingFor::ChooseFromZoneOpponentChooser { ability, .. } => {
+            redact_ability_payment(ability, hidden_ids);
+        }
+        WaitingFor::PayManaAbilityMana {
+            pending_mana_ability,
+            ..
+        } => redact_pending_mana_ability_payment(pending_mana_ability, hidden_ids),
+        WaitingFor::PayAmountChoice {
+            pending_mana_ability,
+            ..
+        } => {
+            if let Some(pending) = pending_mana_ability.as_deref_mut() {
+                redact_pending_mana_ability_payment(pending, hidden_ids);
+            }
+        }
+        WaitingFor::ChooseManaColor { context, .. } => {
+            redact_mana_choice_context_payment(context, hidden_ids);
+        }
+        WaitingFor::PayCost { resume, .. } => match resume {
+            CostResume::ManaAbility { mana_ability } => {
+                redact_pending_mana_ability_payment(mana_ability, hidden_ids);
+            }
+            // The spell resumes are the `pending_cast_mut()` call above.
+            CostResume::Spell { .. } | CostResume::SpellCost { .. } | CostResume::Resolution => {}
+        },
+        WaitingFor::CollectEvidenceChoice { resume, .. } => match resume.as_mut() {
+            CollectEvidenceResume::Effect { pending_ability } => {
+                redact_ability_payment(pending_ability, hidden_ids);
+            }
+            CollectEvidenceResume::ManaAbility {
+                pending_mana_ability,
+            } => redact_pending_mana_ability_payment(pending_mana_ability, hidden_ids),
+            // The casting resume is the `pending_cast_mut()` call above.
+            CollectEvidenceResume::Casting { .. } => {}
+        },
+        // `continuation` is cleared for every viewer earlier in the projection, and
+        // `completion` is dropped by the every-viewer rebuild of this prompt.
+        WaitingFor::ChooseOneOfBranch { .. } | WaitingFor::DigRestSplitChoice { .. } => {}
+        // Casting prompts: their `PendingCast` is the `pending_cast_mut()` call above.
+        WaitingFor::ChooseXValue { .. }
+        | WaitingFor::TargetSelection { .. }
+        | WaitingFor::ModeChoice { .. }
+        | WaitingFor::OptionalCostChoice { .. }
+        | WaitingFor::ChooseGiftRecipient { .. }
+        | WaitingFor::SpliceOffer { .. }
+        | WaitingFor::DefilerPayment { .. }
+        | WaitingFor::OrderCostReductions { .. }
+        | WaitingFor::ActivationCostOneOfChoice { .. }
+        | WaitingFor::CostTypeChoice { .. }
+        | WaitingFor::BlightChoice { .. }
+        | WaitingFor::HarmonizeTapChoice { .. }
+        | WaitingFor::ChooseAnnouncingOpponent { .. } => {}
+        // No retained `ResolvedAbility`, `PendingCast` or `PendingManaAbility`.
+        WaitingFor::Priority { .. }
+        | WaitingFor::ResolveAllConsent { .. }
+        | WaitingFor::ResolveAllReady { .. }
+        | WaitingFor::MeldPairChoice { .. }
+        | WaitingFor::MeldAttackTargetChoice { .. }
+        | WaitingFor::EntryAttackTargetChoice { .. }
+        | WaitingFor::MulliganDecision { .. }
+        | WaitingFor::OpeningHandBottomCards { .. }
+        | WaitingFor::ManaPayment { .. }
+        | WaitingFor::ManaSourceSelection { .. }
+        | WaitingFor::AssistChoosePlayer { .. }
+        | WaitingFor::AssistPayment { .. }
+        | WaitingFor::DeclareAttackers { .. }
+        | WaitingFor::DeclareBlockers { .. }
+        | WaitingFor::UntapChoice { .. }
+        | WaitingFor::ChooseUntapSubset { .. }
+        | WaitingFor::ExertChoice { .. }
+        | WaitingFor::EnlistChoice { .. }
+        | WaitingFor::GameOver { .. }
+        | WaitingFor::ReplacementChoice { .. }
+        | WaitingFor::EntryControllerChoice { .. }
+        | WaitingFor::OrderTriggers { .. }
+        | WaitingFor::CopyTargetChoice { .. }
+        | WaitingFor::EquipTarget { .. }
+        | WaitingFor::CrewVehicle { .. }
+        | WaitingFor::StationTarget { .. }
+        | WaitingFor::SaddleMount { .. }
+        | WaitingFor::ScryChoice { .. }
+        | WaitingFor::RippleRevealChoice { .. }
+        | WaitingFor::RippleBottomOrder { .. }
+        | WaitingFor::RevealUntilBottomOrder { .. }
+        | WaitingFor::ArrangePlanarDeckTopChoice { .. }
+        | WaitingFor::RedistributeLifeTotals { .. }
+        | WaitingFor::CoinFlipKeepChoice { .. }
+        | WaitingFor::DieKeepChoice { .. }
+        | WaitingFor::DigChoice { .. }
+        | WaitingFor::SurveilChoice { .. }
+        | WaitingFor::RevealChoice { .. }
+        | WaitingFor::SearchChoice { .. }
+        | WaitingFor::SearchPartitionChoice { .. }
+        | WaitingFor::OutsideGameChoice { .. }
+        | WaitingFor::ChooseFromZoneChoice { .. }
+        | WaitingFor::BeholdChoice { .. }
+        | WaitingFor::EmpowerJaceChoice { .. }
+        | WaitingFor::ConniveDiscard { .. }
+        | WaitingFor::DiscardChoice { .. }
+        | WaitingFor::EffectZoneChoice { .. }
+        | WaitingFor::DrawnThisTurnTopdeckChoice { .. }
+        | WaitingFor::LearnChoice { .. }
+        | WaitingFor::ManifestDreadChoice { .. }
+        | WaitingFor::TriggerTargetSelection { .. }
+        | WaitingFor::BetweenGamesSideboard { .. }
+        | WaitingFor::BetweenGamesChoosePlayDraw { .. }
+        | WaitingFor::NamedChoice { .. }
+        | WaitingFor::OpponentGuess { .. }
+        | WaitingFor::SpellbookDraft { .. }
+        | WaitingFor::DamageSourceChoice { .. }
+        | WaitingFor::DiscardToHandSize { .. }
+        | WaitingFor::ModalFaceChoice { .. }
+        | WaitingFor::AlternativeCastChoice { .. }
+        | WaitingFor::MutateMergeChoice { .. }
+        | WaitingFor::CipherEncodeChoice { .. }
+        | WaitingFor::CastingVariantChoice { .. }
+        | WaitingFor::ChoosePermanentTypeSlot { .. }
+        | WaitingFor::AbilityModeChoice { .. }
+        | WaitingFor::OptionalEffectChoice { .. }
+        | WaitingFor::ResolutionOptionalPaymentChoice { .. }
+        | WaitingFor::PairChoice { .. }
+        | WaitingFor::TributeChoice { .. }
+        | WaitingFor::MiracleReveal { .. }
+        | WaitingFor::OpponentMayChoice { .. }
+        | WaitingFor::LoopShortcut { .. }
+        | WaitingFor::RespondToShortcut { .. }
+        | WaitingFor::PrecastCopyShortcutOffer { .. }
+        | WaitingFor::RespondToPrecastCopyShortcut { .. }
+        | WaitingFor::ChooseRingBearer { .. }
+        | WaitingFor::ChooseRoomDoor { .. }
+        | WaitingFor::ChooseDungeon { .. }
+        | WaitingFor::ChooseDungeonRoom { .. }
+        | WaitingFor::SpecializeColor { .. }
+        | WaitingFor::RevealUntilKeptChoice { .. }
+        | WaitingFor::TopOrBottomChoice { .. }
+        | WaitingFor::PopulateChoice { .. }
+        | WaitingFor::ClashCardPlacement { .. }
+        | WaitingFor::VoteChoice { .. }
+        | WaitingFor::SeparatePilesChooseOpponent { .. }
+        | WaitingFor::SeparatePilesPartition { .. }
+        | WaitingFor::SeparatePilesChoice { .. }
+        | WaitingFor::CompanionReveal { .. }
+        | WaitingFor::ChooseLegend { .. }
+        | WaitingFor::CommanderZoneChoice { .. }
+        | WaitingFor::BattleProtectorChoice { .. }
+        | WaitingFor::ProliferateChoice { .. }
+        | WaitingFor::TimeTravelChoice { .. }
+        | WaitingFor::ChooseObjectsSelection { .. }
+        | WaitingFor::CategoryChoice { .. }
+        | WaitingFor::EachPlayerCopyChosenSelection { .. }
+        | WaitingFor::KeepWithinTotalPowerChoice { .. }
+        | WaitingFor::KeepExactPermanentsChoice { .. }
+        | WaitingFor::CopyRetarget { .. }
+        | WaitingFor::AssignCombatDamage { .. }
+        | WaitingFor::AssignBlockerDamage { .. }
+        | WaitingFor::DistributeAmong { .. }
+        | WaitingFor::RetargetChoice { .. }
+        | WaitingFor::CombatTaxPayment { .. }
+        | WaitingFor::PhyrexianPayment { .. }
+        | WaitingFor::CastOffer { .. } => {}
+    }
+}
+
+/// CR 601.2h + CR 113.7a + CR 400.2: the root-held paused abilities every viewer receives
+/// (a paused cast, a player-scope sacrifice or unless-payment, a scoped library search and
+/// its delivery, an Epic spell copy, and a resolution-installed prevention rider,
+/// CR 615.5). Only hidden-source payment entries are blanked.
+fn redact_paused_ability_payment(state: &mut GameState, hidden_ids: &HashSet<ObjectId>) {
+    if let Some(pending) = state.pending_cast.as_deref_mut() {
+        redact_pending_cast_payment(pending, hidden_ids);
+    }
+    if let Some(choice) = state.pending_player_scope_sacrifice_choice.as_mut() {
+        redact_ability_payment(&mut choice.ability, hidden_ids);
+    }
+    if let Some(pending) = state.pending_player_scope_unless_payment.as_deref_mut() {
+        redact_ability_payment(&mut pending.pending_effect, hidden_ids);
+    }
+    if let Some(search) = state.pending_scoped_library_search.as_mut() {
+        redact_ability_payment(&mut search.ability, hidden_ids);
+        if let Some(after_scope) = search.after_scope.as_deref_mut() {
+            redact_ability_payment(after_scope, hidden_ids);
+        }
+    }
+    if let Some(crate::types::game_state::LibrarySearchDeliveryResume::Scoped {
+        after_scope: Some(after_scope),
+        ..
+    }) = state.pending_library_search_delivery.as_mut()
+    {
+        redact_ability_payment(after_scope, hidden_ids);
+    }
+    for epic in &mut state.epic_effects {
+        redact_ability_payment(&mut epic.spell, hidden_ids);
+    }
+    for replacement in &mut state.pending_damage_replacements {
+        if let Some(rider) = replacement.runtime_execute.as_deref_mut() {
+            redact_ability_payment(rider, hidden_ids);
+        }
+    }
+    // A read-only pass selects the objects whose rider names a hidden source, so only
+    // those definition lists are copied on write.
+    let rider_objects: Vec<ObjectId> = state
+        .objects
+        .iter()
+        .filter(|(_, object)| {
+            object
+                .replacement_definitions
+                .iter_all()
+                .any(|replacement| {
+                    replacement
+                        .runtime_execute
+                        .as_deref()
+                        .is_some_and(|rider| ability_payment_names_hidden_source(rider, hidden_ids))
+                })
+        })
+        .map(|(id, _)| *id)
+        .collect();
+    for id in rider_objects {
+        let Some(object) = state.objects.get_mut(&id) else {
+            continue;
+        };
+        for index in 0..object.replacement_definitions.len() {
+            if let Some(rider) = object
+                .replacement_definitions
+                .get_mut(index)
+                .and_then(|replacement| replacement.runtime_execute.as_deref_mut())
+            {
+                redact_ability_payment(rider, hidden_ids);
+            }
+        }
+    }
 }
 
 /// CR 400.2 + CR 400.7: id-keyed history that names an object the viewer cannot identify.
@@ -5338,9 +5701,10 @@ mod tests {
         );
 
         // The other prompts that hold a trigger event reach every viewer; each is seeded
-        // alone because `waiting_for` holds one prompt.
-        let pending_effect =
-            || Box::new(ResolvedAbility::new(Effect::NoOp, Vec::new(), paid, owner));
+        // alone because `waiting_for` holds one prompt. The unless-payment prompts'
+        // `pending_effect` latches the payment too (its own rows are in
+        // `paused_ability_carriers_blank_only_hidden_mana_source_payment_snapshots`).
+        let pending_effect = || Box::new(ability.clone());
         let prompts = [
             (
                 "UnlessPayment trigger_event",
@@ -5406,7 +5770,8 @@ mod tests {
                     .any(|(carrier, carried)| carrier == label && carried == &payment),
                 "reach-guard: the raw `{label}` names both sources"
             );
-            let projected = carriers(&filter_state_for_viewer(&prompted, opponent_id));
+            let view = filter_state_for_viewer(&prompted, opponent_id);
+            let projected = carriers(&view);
             let Some((_, carried)) = projected.iter().find(|(carrier, _)| carrier == label) else {
                 panic!("the public `{label}` carrier is kept");
             };
@@ -5419,6 +5784,750 @@ mod tests {
                 carried[1], payment[1],
                 "{label}: the visible mana source's entry is kept"
             );
+            if let WaitingFor::UnlessPayment { pending_effect, .. }
+            | WaitingFor::UnlessPaymentChooseCost { pending_effect, .. } = &view.waiting_for
+            {
+                let carried = &pending_effect
+                    .trigger_source
+                    .as_ref()
+                    .expect("the prompt keeps its ability's source context")
+                    .mana_spent_source_snapshots;
+                assert_eq!(carried[0].source_id, hidden_source, "{label}: id kept");
+                assert_eq!(
+                    carried[0].lki.name, HIDDEN_CARD_NAME,
+                    "{label}: the pending_effect's hidden mana source is blanked"
+                );
+                assert_eq!(carried[1], payment[1], "{label}: pending_effect visible");
+            }
+        }
+    }
+
+    /// The payment fixture shared by the paused-ability carrier rows: a hidden mana source
+    /// (`Secret Island`, in its owner's hand), a visible one (`Public Forest`), and a public
+    /// paid permanent whose two-node ability latches both payment entries.
+    struct PaymentFixture {
+        state: GameState,
+        owner: PlayerId,
+        opponent: PlayerId,
+        hidden_source: ObjectId,
+        paid: ObjectId,
+        payment: Vec<ManaSpentSourceSnapshot>,
+        ability: ResolvedAbility,
+        event: GameEvent,
+    }
+
+    fn payment_fixture() -> PaymentFixture {
+        let mut state = GameState::new_two_player(42);
+        let owner = PlayerId(0);
+        let hidden_source = create_object(
+            &mut state,
+            CardId(11),
+            owner,
+            "Secret Island".to_string(),
+            Zone::Hand,
+        );
+        let public_source = create_object(
+            &mut state,
+            CardId(12),
+            owner,
+            "Public Forest".to_string(),
+            Zone::Battlefield,
+        );
+        let paid = create_object(
+            &mut state,
+            CardId(13),
+            owner,
+            "Paid Permanent".to_string(),
+            Zone::Battlefield,
+        );
+        let payment = vec![
+            ManaSpentSourceSnapshot {
+                source_id: hidden_source,
+                lki: state.objects[&hidden_source].snapshot_for_mana_spent(),
+            },
+            ManaSpentSourceSnapshot {
+                source_id: public_source,
+                lki: state.objects[&public_source].snapshot_for_mana_spent(),
+            },
+        ];
+        state
+            .objects
+            .get_mut(&paid)
+            .expect("seeded object")
+            .mana_spent_source_snapshots = payment.clone();
+        let record = state.objects[&paid].snapshot_for_zone_change(
+            paid,
+            Some(Zone::Stack),
+            Zone::Battlefield,
+        );
+        let mut ability = ResolvedAbility::new(Effect::NoOp, Vec::new(), paid, owner);
+        ability.trigger_source = record.trigger_source_context.clone();
+        // A second payment-bearing node, so the chain walk is exercised too.
+        ability.sub_ability = Some(Box::new(ability.clone()));
+        let event = GameEvent::ZoneChanged {
+            object_id: paid,
+            from: Some(Zone::Stack),
+            to: Zone::Battlefield,
+            record: Box::new(record),
+        };
+        PaymentFixture {
+            state,
+            owner,
+            opponent: PlayerId(1),
+            hidden_source,
+            paid,
+            payment,
+            ability,
+            event,
+        }
+    }
+
+    /// Independent oracle: every `mana_spent_source_snapshots` array at any depth of the
+    /// state's JSON whose path starts with `prefix`. It shares no variant list with the
+    /// typed redaction.
+    fn payment_arrays_under(
+        state: &GameState,
+        prefix: &str,
+    ) -> Vec<(String, Vec<ManaSpentSourceSnapshot>)> {
+        fn walk(
+            value: &serde_json::Value,
+            path: &str,
+            out: &mut Vec<(String, Vec<ManaSpentSourceSnapshot>)>,
+        ) {
+            match value {
+                serde_json::Value::Object(map) => {
+                    for (name, child) in map {
+                        let child_path = format!("{path}/{name}");
+                        if name == "mana_spent_source_snapshots" && child.is_array() {
+                            out.push((
+                                child_path.clone(),
+                                serde_json::from_value(child.clone())
+                                    .expect("a payment snapshot array deserializes"),
+                            ));
+                        }
+                        walk(child, &child_path, out);
+                    }
+                }
+                serde_json::Value::Array(items) => {
+                    for (index, child) in items.iter().enumerate() {
+                        walk(child, &format!("{path}/{index}"), out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut out = Vec::new();
+        walk(
+            &serde_json::to_value(state).expect("state serializes"),
+            "",
+            &mut out,
+        );
+        out.retain(|(path, _)| path.starts_with(prefix));
+        out
+    }
+
+    fn payment_mana_ability(fixture: &PaymentFixture) -> Box<PendingManaAbility> {
+        let mut pending = dummy_pending_mana_ability(fixture.owner, ObjectId(9_900));
+        pending.resume = ManaAbilityResume::UnlessPayment {
+            outer_player: None,
+            cost: Box::new(AbilityCost::PayLife {
+                amount: QuantityExpr::Fixed { value: 2 },
+            }),
+            pending_effect: Box::new(fixture.ability.clone()),
+            trigger_event: Some(fixture.event.clone()),
+            effect_description: None,
+            remaining: Vec::new(),
+        };
+        pending.cost_move_resume = Some(ManaAbilityResume::EffectPayCost {
+            payer: fixture.owner,
+            return_to: fixture.owner,
+            ability: Box::new(fixture.ability.clone()),
+            cost: Box::new(AbilityCost::PayLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+            }),
+        });
+        pending
+    }
+
+    fn payment_cast(fixture: &PaymentFixture) -> Box<PendingCast> {
+        let mut pending = dummy_pending_cast(fixture.paid, CardId(13), fixture.owner);
+        pending.ability = Box::new(fixture.ability.clone());
+        pending
+    }
+
+    /// CR 601.2h + CR 113.7a + CR 118.12a + CR 400.2: every prompt-held and root-held
+    /// paused ability (and paused mana ability) that a viewer receives blanks ONLY the
+    /// payment entry of a mana source now hidden from that viewer, keeping ids, slots,
+    /// order and the visible sibling; the owner keeps the full vector and the
+    /// authoritative state is untouched. SHAPE test with an independent JSON-walk oracle:
+    /// each carrier is seeded alone on a clone of the fixture. The `PayCost` and
+    /// `CostTypeChoice` rows are viewed by an opponent who cannot see the caster's hand,
+    /// so the projection rebuilds those prompts from authoritative state; they fail if the
+    /// payment redaction runs before that rebuild. The production witness is
+    /// `frost_titan_tax_prompt_blanks_hidden_mana_source` in
+    /// tests/integration/issue_9377_hidden_identity_side_tables.rs.
+    #[test]
+    fn paused_ability_carriers_blank_only_hidden_mana_source_payment_snapshots() {
+        use crate::types::game_state::{
+            CollectEvidenceResume, EpicEffect, LibrarySearchDeliveryResume, ManaChoiceContext,
+            ManaChoicePrompt, PayableResource, PendingPlayerScopeSacrificeChoice,
+            PendingPlayerScopeUnlessPayment, ScopedLibrarySearchPhase,
+        };
+        let fixture = payment_fixture();
+        let (owner, opponent_id, paid) = (fixture.owner, fixture.opponent, fixture.paid);
+        let effect = || Box::new(fixture.ability.clone());
+        let mana_ability = || payment_mana_ability(&fixture);
+        let cast = || payment_cast(&fixture);
+        let pay_life = || AbilityCost::PayLife {
+            amount: QuantityExpr::Fixed { value: 2 },
+        };
+        type Seed<'a> = Box<dyn Fn(&mut GameState) + 'a>;
+        let prompt = |waiting_for: WaitingFor| -> Seed<'static> {
+            Box::new(move |state: &mut GameState| state.waiting_for = waiting_for.clone())
+        };
+        // (label, JSON path prefix, expected payment arrays, seed). A `ResolvedAbility`
+        // contributes two arrays (root and sub-ability); a payment-bearing
+        // `PendingManaAbility` five (two abilities plus the unless-payment trigger event).
+        let rows: Vec<(&str, String, usize, Seed<'_>)> = vec![
+            (
+                "UnlessPayment",
+                "/waiting_for/".to_string(),
+                2,
+                prompt(WaitingFor::UnlessPayment {
+                    player: opponent_id,
+                    cost: pay_life(),
+                    pending_effect: effect(),
+                    trigger_event: None,
+                    effect_description: None,
+                    remaining: Vec::new(),
+                }),
+            ),
+            (
+                "UnlessPaymentChooseCost",
+                "/waiting_for/".to_string(),
+                2,
+                prompt(WaitingFor::UnlessPaymentChooseCost {
+                    player: opponent_id,
+                    costs: Vec::new(),
+                    pending_effect: effect(),
+                    trigger_event: None,
+                    effect_description: None,
+                    remaining_choices: Vec::new(),
+                    chosen: Vec::new(),
+                }),
+            ),
+            (
+                "WardDiscardChoice",
+                "/waiting_for/".to_string(),
+                2,
+                prompt(WaitingFor::WardDiscardChoice {
+                    player: opponent_id,
+                    cards: Vec::new(),
+                    pending_effect: effect(),
+                    remaining: 1,
+                    filter: None,
+                }),
+            ),
+            (
+                "WardSacrificeChoice",
+                "/waiting_for/".to_string(),
+                2,
+                prompt(WaitingFor::WardSacrificeChoice {
+                    player: opponent_id,
+                    permanents: Vec::new(),
+                    pending_effect: effect(),
+                    remaining: 1,
+                    min_total_power: None,
+                }),
+            ),
+            (
+                "UnlessBounceChoice",
+                "/waiting_for/".to_string(),
+                2,
+                prompt(WaitingFor::UnlessBounceChoice {
+                    player: opponent_id,
+                    permanents: Vec::new(),
+                    pending_effect: effect(),
+                    remaining: 1,
+                }),
+            ),
+            (
+                "ExploreChoice",
+                "/waiting_for/".to_string(),
+                2,
+                prompt(WaitingFor::ExploreChoice {
+                    player: owner,
+                    source_id: paid,
+                    choosable: Vec::new(),
+                    remaining: Vec::new(),
+                    pending_effect: effect(),
+                }),
+            ),
+            (
+                "ReturnAsAuraTarget",
+                "/waiting_for/".to_string(),
+                2,
+                prompt(WaitingFor::ReturnAsAuraTarget {
+                    player: owner,
+                    source_id: paid,
+                    returned_id: paid,
+                    legal_targets: Vec::new(),
+                    pending_effect: effect(),
+                }),
+            ),
+            (
+                "MoveCountersDistribution",
+                "/waiting_for/".to_string(),
+                2,
+                prompt(WaitingFor::MoveCountersDistribution {
+                    player: owner,
+                    source_id: paid,
+                    counter_type: None,
+                    available: Vec::new(),
+                    destinations: Vec::new(),
+                    pending_effect: effect(),
+                }),
+            ),
+            (
+                "RemoveCountersChoice",
+                "/waiting_for/".to_string(),
+                2,
+                prompt(WaitingFor::RemoveCountersChoice {
+                    player: owner,
+                    source_id: paid,
+                    counter_type: None,
+                    available: Vec::new(),
+                    pending_effect: effect(),
+                }),
+            ),
+            (
+                "MultiTargetSelection",
+                "/waiting_for/".to_string(),
+                2,
+                prompt(WaitingFor::MultiTargetSelection {
+                    player: owner,
+                    legal_targets: Vec::new(),
+                    min_targets: 0,
+                    max_targets: 1,
+                    pending_ability: effect(),
+                }),
+            ),
+            (
+                "RepeatDecision",
+                "/waiting_for/".to_string(),
+                2,
+                prompt(WaitingFor::RepeatDecision {
+                    player: owner,
+                    ability: effect(),
+                }),
+            ),
+            (
+                "ClashChooseOpponent",
+                "/waiting_for/".to_string(),
+                2,
+                prompt(WaitingFor::ClashChooseOpponent {
+                    player: owner,
+                    candidates: vec![opponent_id],
+                    ability: effect(),
+                }),
+            ),
+            (
+                "ChooseFromZoneOpponentChooser",
+                "/waiting_for/".to_string(),
+                2,
+                prompt(WaitingFor::ChooseFromZoneOpponentChooser {
+                    player: owner,
+                    candidates: vec![opponent_id],
+                    ability: effect(),
+                    purpose: Default::default(),
+                }),
+            ),
+            (
+                "ChooseXValue pending_cast",
+                "/waiting_for/".to_string(),
+                2,
+                prompt(WaitingFor::ChooseXValue {
+                    player: owner,
+                    min: 0,
+                    max: 5,
+                    pending_cast: cast(),
+                    convoke_mode: None,
+                    x_cost_previews: Vec::new(),
+                }),
+            ),
+            (
+                "PayManaAbilityMana",
+                "/waiting_for/".to_string(),
+                5,
+                prompt(WaitingFor::PayManaAbilityMana {
+                    player: owner,
+                    options: Vec::new(),
+                    pending_mana_ability: mana_ability(),
+                }),
+            ),
+            (
+                "PayAmountChoice",
+                "/waiting_for/".to_string(),
+                5,
+                prompt(WaitingFor::PayAmountChoice {
+                    player: owner,
+                    resource: PayableResource::Energy,
+                    min: 0,
+                    max: 1,
+                    accumulated: 0,
+                    source_id: paid,
+                    pending_mana_ability: Some(mana_ability()),
+                }),
+            ),
+            (
+                "ChooseManaColor ManaAbility",
+                "/waiting_for/".to_string(),
+                5,
+                prompt(WaitingFor::ChooseManaColor {
+                    player: owner,
+                    choice: ManaChoicePrompt::SingleColor {
+                        options: Vec::new(),
+                    },
+                    context: ManaChoiceContext::ManaAbility(mana_ability()),
+                }),
+            ),
+            (
+                "ChooseManaColor ResolvingEffect",
+                "/waiting_for/".to_string(),
+                2,
+                prompt(WaitingFor::ChooseManaColor {
+                    player: owner,
+                    choice: ManaChoicePrompt::SingleColor {
+                        options: Vec::new(),
+                    },
+                    context: ManaChoiceContext::ResolvingEffect(effect()),
+                }),
+            ),
+            (
+                "CollectEvidenceChoice Effect",
+                "/waiting_for/".to_string(),
+                2,
+                prompt(WaitingFor::CollectEvidenceChoice {
+                    player: owner,
+                    minimum_mana_value: 1,
+                    cards: Vec::new(),
+                    resume: Box::new(CollectEvidenceResume::Effect {
+                        pending_ability: effect(),
+                    }),
+                }),
+            ),
+            (
+                "CollectEvidenceChoice ManaAbility",
+                "/waiting_for/".to_string(),
+                5,
+                prompt(WaitingFor::CollectEvidenceChoice {
+                    player: owner,
+                    minimum_mana_value: 1,
+                    cards: Vec::new(),
+                    resume: Box::new(CollectEvidenceResume::ManaAbility {
+                        pending_mana_ability: mana_ability(),
+                    }),
+                }),
+            ),
+            (
+                "CollectEvidenceChoice Casting",
+                "/waiting_for/".to_string(),
+                2,
+                prompt(WaitingFor::CollectEvidenceChoice {
+                    player: owner,
+                    minimum_mana_value: 1,
+                    cards: Vec::new(),
+                    resume: Box::new(CollectEvidenceResume::Casting {
+                        pending_cast: cast(),
+                        source: Default::default(),
+                    }),
+                }),
+            ),
+            (
+                "PayCost ManaAbility (rebuilt for the opponent)",
+                "/waiting_for/".to_string(),
+                5,
+                prompt(WaitingFor::PayCost {
+                    player: owner,
+                    kind: PayCostKind::ExileFromZone {
+                        zone: ExileCostSourceZone::Hand,
+                    },
+                    choices: vec![fixture.hidden_source],
+                    count: 1,
+                    min_count: 1,
+                    resume: CostResume::ManaAbility {
+                        mana_ability: mana_ability(),
+                    },
+                }),
+            ),
+            (
+                "PayCost Spell (rebuilt for the opponent)",
+                "/waiting_for/".to_string(),
+                2,
+                prompt(WaitingFor::PayCost {
+                    player: owner,
+                    kind: PayCostKind::ExileFromZone {
+                        zone: ExileCostSourceZone::Hand,
+                    },
+                    choices: vec![fixture.hidden_source],
+                    count: 1,
+                    min_count: 1,
+                    resume: CostResume::Spell { spell: cast() },
+                }),
+            ),
+            (
+                "CostTypeChoice (rebuilt for the opponent)",
+                "/waiting_for/".to_string(),
+                2,
+                prompt(WaitingFor::CostTypeChoice {
+                    player: owner,
+                    choice_type: crate::types::ability::ChoiceType::CreatureType {
+                        options: Vec::new(),
+                    },
+                    options: vec!["Goblin".to_string()],
+                    pending_cast: cast(),
+                }),
+            ),
+            (
+                "pending_cast",
+                "/pending_cast/".to_string(),
+                2,
+                Box::new(|state: &mut GameState| state.pending_cast = Some(cast())),
+            ),
+            (
+                "pending_player_scope_sacrifice_choice",
+                "/pending_player_scope_sacrifice_choice/".to_string(),
+                2,
+                Box::new(|state: &mut GameState| {
+                    state.pending_player_scope_sacrifice_choice =
+                        Some(PendingPlayerScopeSacrificeChoice {
+                            ability: effect(),
+                            remaining_players: Vec::new(),
+                            selections: Vec::new(),
+                            completion: Default::default(),
+                        });
+                }),
+            ),
+            (
+                "pending_player_scope_unless_payment",
+                "/pending_player_scope_unless_payment/".to_string(),
+                2,
+                Box::new(|state: &mut GameState| {
+                    state.pending_player_scope_unless_payment =
+                        Some(Box::new(PendingPlayerScopeUnlessPayment {
+                            pending_effect: effect(),
+                            remaining_players: Vec::new(),
+                            declining_players: Vec::new(),
+                            current_player: opponent_id,
+                            cost: pay_life(),
+                        }));
+                }),
+            ),
+            (
+                "pending_scoped_library_search",
+                "/pending_scoped_library_search/".to_string(),
+                4,
+                Box::new(|state: &mut GameState| {
+                    state.pending_scoped_library_search = Some(PendingScopedLibrarySearch {
+                        ability: effect(),
+                        phase: ScopedLibrarySearchPhase::Delivering {
+                            search_keys: vec![owner],
+                        },
+                        after_scope: Some(effect()),
+                    });
+                }),
+            ),
+            (
+                "pending_library_search_delivery",
+                "/pending_library_search_delivery/".to_string(),
+                2,
+                Box::new(|state: &mut GameState| {
+                    state.pending_library_search_delivery =
+                        Some(LibrarySearchDeliveryResume::Scoped {
+                            player: owner,
+                            source_id: paid,
+                            search_keys: vec![owner],
+                            grants: Vec::new(),
+                            after_scope: Some(effect()),
+                        });
+                }),
+            ),
+            (
+                "epic_effects",
+                "/epic_effects/".to_string(),
+                2,
+                Box::new(|state: &mut GameState| {
+                    state.epic_effects = vec![EpicEffect {
+                        controller: owner,
+                        prototype_id: paid,
+                        spell: effect(),
+                    }];
+                }),
+            ),
+            (
+                "pending_damage_replacements rider",
+                "/pending_damage_replacements/".to_string(),
+                2,
+                Box::new(|state: &mut GameState| {
+                    state.pending_damage_replacements =
+                        vec![ReplacementDefinition::new(ReplacementEvent::DamageDone)
+                            .runtime_execute(fixture.ability.clone())];
+                }),
+            ),
+            (
+                "object replacement_definitions rider",
+                format!("/objects/{}/replacement_definitions/", paid.0),
+                2,
+                Box::new(|state: &mut GameState| {
+                    state
+                        .objects
+                        .get_mut(&paid)
+                        .expect("paid object")
+                        .replacement_definitions =
+                        vec![ReplacementDefinition::new(ReplacementEvent::DamageDone)
+                            .runtime_execute(fixture.ability.clone())]
+                        .into();
+                }),
+            ),
+        ];
+
+        for (label, prefix, expected, seed) in &rows {
+            let mut state = fixture.state.clone();
+            seed(&mut state);
+            let raw = payment_arrays_under(&state, prefix);
+            assert_eq!(
+                raw.len(),
+                *expected,
+                "reach-guard: `{label}` seeds {expected} payment arrays under {prefix}: {raw:#?}"
+            );
+            for (path, carried) in &raw {
+                assert_eq!(
+                    carried, &fixture.payment,
+                    "reach-guard: raw `{label}` {path} names both sources"
+                );
+            }
+
+            for (viewer, view) in [
+                ("opponent", filter_state_for_viewer(&state, opponent_id)),
+                ("spectator", filter_state_for_unseated_viewer(&state)),
+            ] {
+                assert_eq!(
+                    view.objects[&fixture.hidden_source].name, HIDDEN_CARD_NAME,
+                    "reach-guard ({viewer}): the mana source in hand is hidden"
+                );
+                match (&state.waiting_for, &view.waiting_for) {
+                    (WaitingFor::PayCost { .. }, WaitingFor::PayCost { choices, .. }) => {
+                        assert!(
+                            choices.iter().all(|id| *id == ObjectId(0)),
+                            "reach-guard ({viewer}): `{label}` was rebuilt for this viewer"
+                        );
+                    }
+                    (
+                        WaitingFor::CostTypeChoice { .. },
+                        WaitingFor::CostTypeChoice { options, .. },
+                    ) => {
+                        assert!(
+                            options.is_empty(),
+                            "reach-guard ({viewer}): `{label}` was rebuilt for this viewer"
+                        );
+                    }
+                    _ => {}
+                }
+                let projected = payment_arrays_under(&view, prefix);
+                assert_eq!(
+                    projected.iter().map(|(path, _)| path).collect::<Vec<_>>(),
+                    raw.iter().map(|(path, _)| path).collect::<Vec<_>>(),
+                    "{viewer}: `{label}` keeps every payment array"
+                );
+                for (path, carried) in &projected {
+                    assert_eq!(carried.len(), 2, "{viewer} `{label}` {path}: length kept");
+                    assert_eq!(
+                        carried[0].source_id, fixture.hidden_source,
+                        "{viewer} `{label}` {path}: id kept"
+                    );
+                    assert_eq!(
+                        carried[0].lki.name, HIDDEN_CARD_NAME,
+                        "{viewer} `{label}` {path}: the hidden mana source is still named"
+                    );
+                    assert!(
+                        carried[0].lki.card_types.is_empty(),
+                        "{viewer} `{label}` {path}"
+                    );
+                    assert_eq!(
+                        carried[1], fixture.payment[1],
+                        "{viewer} `{label}` {path}: the visible mana source's entry is kept"
+                    );
+                }
+            }
+            assert_eq!(
+                payment_arrays_under(&filter_state_for_viewer(&state, owner), prefix),
+                raw,
+                "the owner keeps `{label}` intact"
+            );
+            assert_eq!(
+                payment_arrays_under(&state, prefix),
+                raw,
+                "authoritative `{label}` is untouched by the projections"
+            );
+        }
+
+        // Negative controls: carriers no viewer receives are absent from every projection.
+        let mut state = fixture.state.clone();
+        state.pending_cost_move_resume = Some(PendingCostMoveResume::ManaAbilityPayment {
+            pending: mana_ability(),
+            cursor: ManaAbilityCostCursor {
+                remaining: Vec::new(),
+                remaining_life_payments: Vec::new(),
+                resolution_mode: ManaAbilityCostResolutionMode::Interactive,
+                excluded_sources: Vec::new(),
+                sub_cost_demand: None,
+                next_tapper: 0,
+                next_discard: 0,
+                next_exiled: 0,
+                next_sacrificed: 0,
+                next_counter_choice: 0,
+                selected_exile_remaining: None,
+                selected_sacrifice_remaining: None,
+                deferred_cost_events: Vec::new(),
+                current_action_deferred_start: 0,
+                parent: None,
+            },
+        });
+        state.waiting_for = WaitingFor::ChooseOneOfBranch {
+            player: owner,
+            controller: owner,
+            source_id: paid,
+            branches: Vec::new(),
+            branch_descriptions: Vec::new(),
+            parent_targets: Vec::new(),
+            context: Default::default(),
+            continuation: Some(effect()),
+            replacement_applied: Default::default(),
+            remaining_players: Vec::new(),
+        };
+        assert_eq!(
+            payment_arrays_under(&state, "/pending_cost_move_resume/").len(),
+            5,
+            "reach-guard: the raw cost-move cursor latches the payment"
+        );
+        assert_eq!(
+            payment_arrays_under(&state, "/waiting_for/").len(),
+            2,
+            "reach-guard: the raw ChooseOneOf continuation latches the payment"
+        );
+        for view in [
+            filter_state_for_viewer(&state, opponent_id),
+            filter_state_for_viewer(&state, owner),
+            filter_state_for_unseated_viewer(&state),
+        ] {
+            assert!(view.pending_cost_move_resume.is_none());
+            assert!(matches!(
+                view.waiting_for,
+                WaitingFor::ChooseOneOfBranch {
+                    continuation: None,
+                    ..
+                }
+            ));
         }
     }
 
