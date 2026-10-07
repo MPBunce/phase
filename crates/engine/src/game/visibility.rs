@@ -3929,12 +3929,19 @@ fn redact_mana_choice_context_payment(
 /// public ability spine (source, controller, effect, targets, description) is kept. The
 /// authoritative prompt keeps the full ability for resolution (CR 608.2h).
 ///
-/// Keep this complete rather than using a catch-all: new pause states must explicitly
-/// decide whether they retain an ability.
+/// This match is NOT exhaustive: it lists the carrier variants and falls through a
+/// wildcard arm for every variant that retains no `ResolvedAbility`, `PendingCast` or
+/// `PendingManaAbility`. That is deliberate, so this function adds no arm for the loop
+/// shortcut prompt and the loop-shortcut writer census
+/// (tests/integration/loop_shortcut_offer_writer_census.rs) stays unchanged. A future
+/// `WaitingFor` variant that holds a `ResolvedAbility` or `PendingCast` must be added here
+/// by hand: the compiler will not flag it, and the independent JSON key-walk oracle in
+/// `paused_ability_carriers_blank_only_hidden_mana_source_payment_snapshots` only checks
+/// the variants it seeds.
 fn redact_waiting_for_payment(waiting_for: &mut WaitingFor, hidden_ids: &HashSet<ObjectId>) {
     use crate::types::game_state::{CollectEvidenceResume, CostResume};
     // Every casting prompt that holds a `PendingCast` (including a `PayCost` spell resume
-    // and a casting `CollectEvidenceChoice`); listed below as handled.
+    // and a casting `CollectEvidenceChoice`); the match below covers only the rest.
     if let Some(pending) = waiting_for.pending_cast_mut() {
         redact_pending_cast_payment(pending, hidden_ids);
     }
@@ -3990,131 +3997,13 @@ fn redact_waiting_for_payment(waiting_for: &mut WaitingFor, hidden_ids: &HashSet
             // The casting resume is the `pending_cast_mut()` call above.
             CollectEvidenceResume::Casting { .. } => {}
         },
-        // `continuation` is cleared for every viewer earlier in the projection, and
-        // `completion` is dropped by the every-viewer rebuild of this prompt.
-        WaitingFor::ChooseOneOfBranch { .. } | WaitingFor::DigRestSplitChoice { .. } => {}
-        // Casting prompts: their `PendingCast` is the `pending_cast_mut()` call above.
-        WaitingFor::ChooseXValue { .. }
-        | WaitingFor::TargetSelection { .. }
-        | WaitingFor::ModeChoice { .. }
-        | WaitingFor::OptionalCostChoice { .. }
-        | WaitingFor::ChooseGiftRecipient { .. }
-        | WaitingFor::SpliceOffer { .. }
-        | WaitingFor::DefilerPayment { .. }
-        | WaitingFor::OrderCostReductions { .. }
-        | WaitingFor::ActivationCostOneOfChoice { .. }
-        | WaitingFor::CostTypeChoice { .. }
-        | WaitingFor::BlightChoice { .. }
-        | WaitingFor::HarmonizeTapChoice { .. }
-        | WaitingFor::ChooseAnnouncingOpponent { .. } => {}
-        // No retained `ResolvedAbility`, `PendingCast` or `PendingManaAbility`.
-        WaitingFor::Priority { .. }
-        | WaitingFor::ResolveAllConsent { .. }
-        | WaitingFor::ResolveAllReady { .. }
-        | WaitingFor::MeldPairChoice { .. }
-        | WaitingFor::MeldAttackTargetChoice { .. }
-        | WaitingFor::EntryAttackTargetChoice { .. }
-        | WaitingFor::MulliganDecision { .. }
-        | WaitingFor::OpeningHandBottomCards { .. }
-        | WaitingFor::ManaPayment { .. }
-        | WaitingFor::ManaSourceSelection { .. }
-        | WaitingFor::AssistChoosePlayer { .. }
-        | WaitingFor::AssistPayment { .. }
-        | WaitingFor::DeclareAttackers { .. }
-        | WaitingFor::DeclareBlockers { .. }
-        | WaitingFor::UntapChoice { .. }
-        | WaitingFor::ChooseUntapSubset { .. }
-        | WaitingFor::ExertChoice { .. }
-        | WaitingFor::EnlistChoice { .. }
-        | WaitingFor::GameOver { .. }
-        | WaitingFor::ReplacementChoice { .. }
-        | WaitingFor::EntryControllerChoice { .. }
-        | WaitingFor::OrderTriggers { .. }
-        | WaitingFor::CopyTargetChoice { .. }
-        | WaitingFor::EquipTarget { .. }
-        | WaitingFor::CrewVehicle { .. }
-        | WaitingFor::StationTarget { .. }
-        | WaitingFor::SaddleMount { .. }
-        | WaitingFor::ScryChoice { .. }
-        | WaitingFor::RippleRevealChoice { .. }
-        | WaitingFor::RippleBottomOrder { .. }
-        | WaitingFor::RevealUntilBottomOrder { .. }
-        | WaitingFor::ArrangePlanarDeckTopChoice { .. }
-        | WaitingFor::RedistributeLifeTotals { .. }
-        | WaitingFor::CoinFlipKeepChoice { .. }
-        | WaitingFor::DieKeepChoice { .. }
-        | WaitingFor::DigChoice { .. }
-        | WaitingFor::SurveilChoice { .. }
-        | WaitingFor::RevealChoice { .. }
-        | WaitingFor::SearchChoice { .. }
-        | WaitingFor::SearchPartitionChoice { .. }
-        | WaitingFor::OutsideGameChoice { .. }
-        | WaitingFor::ChooseFromZoneChoice { .. }
-        | WaitingFor::BeholdChoice { .. }
-        | WaitingFor::EmpowerJaceChoice { .. }
-        | WaitingFor::ConniveDiscard { .. }
-        | WaitingFor::DiscardChoice { .. }
-        | WaitingFor::EffectZoneChoice { .. }
-        | WaitingFor::DrawnThisTurnTopdeckChoice { .. }
-        | WaitingFor::LearnChoice { .. }
-        | WaitingFor::ManifestDreadChoice { .. }
-        | WaitingFor::TriggerTargetSelection { .. }
-        | WaitingFor::BetweenGamesSideboard { .. }
-        | WaitingFor::BetweenGamesChoosePlayDraw { .. }
-        | WaitingFor::NamedChoice { .. }
-        | WaitingFor::OpponentGuess { .. }
-        | WaitingFor::SpellbookDraft { .. }
-        | WaitingFor::DamageSourceChoice { .. }
-        | WaitingFor::DiscardToHandSize { .. }
-        | WaitingFor::ModalFaceChoice { .. }
-        | WaitingFor::AlternativeCastChoice { .. }
-        | WaitingFor::MutateMergeChoice { .. }
-        | WaitingFor::CipherEncodeChoice { .. }
-        | WaitingFor::CastingVariantChoice { .. }
-        | WaitingFor::ChoosePermanentTypeSlot { .. }
-        | WaitingFor::AbilityModeChoice { .. }
-        | WaitingFor::OptionalEffectChoice { .. }
-        | WaitingFor::ResolutionOptionalPaymentChoice { .. }
-        | WaitingFor::PairChoice { .. }
-        | WaitingFor::TributeChoice { .. }
-        | WaitingFor::MiracleReveal { .. }
-        | WaitingFor::OpponentMayChoice { .. }
-        | WaitingFor::LoopShortcut { .. }
-        | WaitingFor::RespondToShortcut { .. }
-        | WaitingFor::PrecastCopyShortcutOffer { .. }
-        | WaitingFor::RespondToPrecastCopyShortcut { .. }
-        | WaitingFor::ChooseRingBearer { .. }
-        | WaitingFor::ChooseRoomDoor { .. }
-        | WaitingFor::ChooseDungeon { .. }
-        | WaitingFor::ChooseDungeonRoom { .. }
-        | WaitingFor::SpecializeColor { .. }
-        | WaitingFor::RevealUntilKeptChoice { .. }
-        | WaitingFor::TopOrBottomChoice { .. }
-        | WaitingFor::PopulateChoice { .. }
-        | WaitingFor::ClashCardPlacement { .. }
-        | WaitingFor::VoteChoice { .. }
-        | WaitingFor::SeparatePilesChooseOpponent { .. }
-        | WaitingFor::SeparatePilesPartition { .. }
-        | WaitingFor::SeparatePilesChoice { .. }
-        | WaitingFor::CompanionReveal { .. }
-        | WaitingFor::ChooseLegend { .. }
-        | WaitingFor::CommanderZoneChoice { .. }
-        | WaitingFor::BattleProtectorChoice { .. }
-        | WaitingFor::ProliferateChoice { .. }
-        | WaitingFor::TimeTravelChoice { .. }
-        | WaitingFor::ChooseObjectsSelection { .. }
-        | WaitingFor::CategoryChoice { .. }
-        | WaitingFor::EachPlayerCopyChosenSelection { .. }
-        | WaitingFor::KeepWithinTotalPowerChoice { .. }
-        | WaitingFor::KeepExactPermanentsChoice { .. }
-        | WaitingFor::CopyRetarget { .. }
-        | WaitingFor::AssignCombatDamage { .. }
-        | WaitingFor::AssignBlockerDamage { .. }
-        | WaitingFor::DistributeAmong { .. }
-        | WaitingFor::RetargetChoice { .. }
-        | WaitingFor::CombatTaxPayment { .. }
-        | WaitingFor::PhyrexianPayment { .. }
-        | WaitingFor::CastOffer { .. } => {}
+        // Deliberate wildcard (see the doc comment): every other variant leaves nothing for
+        // this match to redact. A casting prompt's `PendingCast` is the `pending_cast_mut()`
+        // call above; a `ChooseOneOfBranch` / `DigRestSplitChoice` `continuation` is cleared
+        // for every viewer earlier in the projection and its `completion` is dropped by the
+        // every-viewer rebuild of the prompt; the rest retain no `ResolvedAbility`,
+        // `PendingCast` or `PendingManaAbility`.
+        _ => {}
     }
 }
 
