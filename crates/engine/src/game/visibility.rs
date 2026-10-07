@@ -1746,6 +1746,8 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
                 duration_subject: _,
                 duration_event_source,
                 end_permission: _,
+                // An id-only incarnation reference, not a payment carrier.
+                granting_object: _,
                 source_name: _,
             } = effect;
             duration_event_source.as_deref().is_some_and(|context| {
@@ -5236,6 +5238,7 @@ mod tests {
                 duration_subject: None,
                 duration_event_source: record.trigger_source_context.clone().map(Box::new),
                 end_permission: None,
+                granting_object: None,
                 source_name: "Paid Permanent".to_string(),
             },
         );
