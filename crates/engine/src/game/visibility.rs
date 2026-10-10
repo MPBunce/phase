@@ -1654,7 +1654,7 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
     // CR 601.2h + CR 603.3b + CR 400.2: the same event shapes wait in the trigger
     // collection carriers. A carrier whose trigger controller is not this viewer is
     // cleared further down; the controller keeps it with only hidden-source payment
-    // entries blanked. The entry events deferred behind an entering choice
+    // entries blanked and hidden linked-exile members' mana values zeroed. The entry events deferred behind an entering choice
     // (CR 614.12a) and a paused sacrifice batch's events (CR 701.21a) reach every viewer.
     for event in filtered
         .pending_trigger_event_batch
@@ -1726,9 +1726,10 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
         } => redact_hidden_zone_change_event(event, &hidden_zone_change_ids),
         _ => {}
     }
-    // CR 611.2a + CR 601.2h: an until-event effect latches its source's context, payment
-    // snapshots included. A read-only pass selects the effects naming a hidden source, so
-    // only those are taken mutably.
+    // CR 611.2a + CR 601.2h + CR 406.3: an until-event effect latches its source's context,
+    // payment snapshots and linked-exile members included. A read-only pass selects the
+    // effects naming a hidden source or a hidden linked-exile member, so only those are taken
+    // mutably.
     let latched_effects: Vec<usize> = filtered
         .transient_continuous_effects
         .iter()
@@ -1752,10 +1753,7 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
                 source_name: _,
             } = effect;
             duration_event_source.as_deref().is_some_and(|context| {
-                payment_names_hidden_source(
-                    &context.mana_spent_source_snapshots,
-                    &hidden_zone_change_ids,
-                )
+                source_context_names_hidden_member(context, &hidden_zone_change_ids)
             })
         })
         .map(|(index, _)| index)
@@ -1766,10 +1764,7 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
             .get_mut(index)
             .and_then(|effect| effect.duration_event_source.as_deref_mut())
         {
-            redact_payment_source_snapshots(
-                &mut context.mana_spent_source_snapshots,
-                &hidden_zone_change_ids,
-            );
+            redact_source_context_hidden_members(context, &hidden_zone_change_ids);
         }
     }
     // CR 400.2 + CR 401.2 + CR 603.7: a phase-delayed ability carries the
@@ -1781,7 +1776,8 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
     // entries. (`resolution_stack` and the paused-resolution resumes are blanked
     // above; `departed_stack_spells` holds spells, never delayed abilities.)
     // CR 601.2h + CR 113.7a: the same carriers latch their source's payment snapshots in
-    // `ResolvedAbility::trigger_source`; a hidden mana source's entry is blanked there too.
+    // `ResolvedAbility::trigger_source`; a hidden mana source's entry is blanked there too,
+    // and a hidden linked-exile member's mana value is zeroed (CR 406.3).
     let mut redact_lookback =
         |event: &mut GameEvent| redact_hidden_zone_change_event(event, &hidden_zone_change_ids);
     for trigger in &mut filtered.delayed_triggers {
@@ -3017,7 +3013,8 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
     redact_hidden_library_identity_carriers(&mut filtered, &hidden_library_ids);
 
     // CR 601.2h + CR 113.7a + CR 400.2: prompt-held and root-held paused abilities latch
-    // their source's payment snapshots too. This runs after every `waiting_for` rebuild
+    // their source's payment snapshots and linked-exile members too (CR 406.3). This runs
+    // after every `waiting_for` rebuild
     // above (`PayCost`, `CostTypeChoice`, ...), which re-clone the authoritative prompt and
     // would otherwise restore an unredacted ability.
     redact_waiting_for_payment(&mut filtered.waiting_for, &hidden_zone_change_ids);
@@ -3696,8 +3693,9 @@ fn redact_printed_identity(obj: &mut crate::game::game_object::GameObject) {
 /// The retained event shapes that carry a `ZoneChangeRecord` or a `TriggerSourceContext`:
 /// `ZoneChanged`, `CreatureExploited` (the sacrificed victim's record) and
 /// `SagaChapterAbilityResolved` (the Saga's latched trigger-source context). A record whose
-/// object is hidden is redacted whole; otherwise only hidden-source payment entries are.
-/// The Saga context is never redacted whole here; only its payment entries are.
+/// object is hidden is redacted whole; otherwise only hidden-source payment entries and hidden
+/// linked-exile members' mana values are. The Saga context is never redacted whole here;
+/// only those are.
 fn redact_hidden_zone_change_event(event: &mut GameEvent, hidden_ids: &HashSet<ObjectId>) {
     match event {
         GameEvent::ZoneChanged {
@@ -3730,14 +3728,14 @@ fn redact_hidden_zone_change_event(event: &mut GameEvent, hidden_ids: &HashSet<O
             chapter: _,
             final_chapter: _,
         } => {
-            redact_payment_source_snapshots(&mut saga.mana_spent_source_snapshots, hidden_ids);
+            redact_source_context_hidden_members(saga, hidden_ids);
         }
         _ => {}
     }
 }
 
-/// CR 601.2h + CR 106.3 + CR 400.2: a spell's payment snapshots name the source of each
-/// mana spent, as that source existed when the mana was paid. The cast object stays public,
+/// CR 601.2h + CR 106.3 + CR 400.2 (and, for the linked-exile vector, CR 406.3 + CR 406.3a +
+/// CR 607.2a): a spell's payment snapshots name the source of each mana spent, as that source existed when the mana was paid. The cast object stays public,
 /// but a source that has since moved into a zone the viewer cannot see is a hidden card: its
 /// entry keeps `source_id` and its slot (vector length and order are payment facts), and
 /// only its last-known identity (`lki`) is blanked. Entries naming a visible source are
@@ -3746,6 +3744,16 @@ fn redact_hidden_zone_change_event(event: &mut GameEvent, hidden_ids: &HashSet<O
 /// Accepted display divergence: a derived "mana from a <type> source" quantity computed on
 /// the projected state reads the blanked types of a hidden source. Those quantities are
 /// rules decisions evaluated on authoritative state, never on the projection.
+///
+/// The same carriers (every `ZoneChangeRecord` of a visible object and every
+/// `TriggerSourceContext`) also latch `linked_exile_snapshot`, the cards linked as exiled
+/// with the source (CR 603.10a). A member whose `exiled_id` is a hidden card (a face-down
+/// hideaway card the viewer may not look at, CR 406.3) keeps its slot, id and owner and has
+/// only its `mana_value` zeroed (`redact_linked_exile_snapshot`); the same hidden-id set
+/// decides both, so an authorized looker keeps real values. A record of a hidden object is
+/// anonymised whole, as before. Accepted display divergence: a quantity such as 'total mana
+/// value of cards exiled with this' computed on the projected state reads 0 for a hidden
+/// member; rules decisions run on authoritative state.
 ///
 /// Carriers covered: public `objects`; public departed stack spells (object and entry
 /// ability); the zone-change and sacrifice ledgers; a `Duration::UntilEvent` effect's
@@ -3782,7 +3790,12 @@ fn redact_hidden_zone_change_event(event: &mut GameEvent, hidden_ids: &HashSet<O
 /// `pending_deferred_life_cost_resume`, `pending_triggered_mana_resume`,
 /// `pending_discard_batch`, `resolution_stack` and the other private resume cursors
 /// cleared above, `payment_transaction` (`None` in every projection); not serialized:
-/// `pending_discard_for_cost`, `resolving_player_scope_linked_exile`.
+/// `pending_discard_for_cost`, `resolving_player_scope_linked_exile`;
+/// `return_result_frames`, `LogicalZoneChangeGroup` latches and
+/// `ResolvedCommands.zone_change_record` (cleared with `resolution_stack` /
+/// `resolved_rules_journal`), `NamedChoiceSource.context` and `OpponentGuessOwner.context`
+/// (cleared for every viewer); `created_tokens_this_turn` records carry no linked-exile
+/// vector by construction.
 ///
 /// Out of scope: the `cast_cost_paid_object` family (`GameObject`, `TriggerSourceContext`,
 /// `PendingManaAbility.cost_paid_object`, `SpellContext.cost_paid_object(s)`/
@@ -3790,7 +3803,8 @@ fn redact_hidden_zone_change_event(event: &mut GameEvent, hidden_ids: &HashSet<O
 /// (`CostPaidObjectSnapshot`) and writer set; event carriers outside the loops above;
 /// raw-event transport; stable-id tracking and `proposer_hidden_view` (#9377 section 1).
 ///
-/// The wire census guard covers only the `mana_spent_source_snapshots` key.
+/// The payment wire census covers only the `mana_spent_source_snapshots` key;
+/// `assert_linked_exile_census` in the 9377 integration file covers `linked_exile_snapshot`.
 fn redact_payment_source_snapshots(
     snapshots: &mut [crate::types::game_state::ManaSpentSourceSnapshot],
     hidden_ids: &HashSet<ObjectId>,
@@ -3803,25 +3817,71 @@ fn redact_payment_source_snapshots(
     }
 }
 
+/// A hidden member keeps its slot; only its mana value identifies the card (CR 406.3a).
+fn redact_linked_exile_members(
+    members: &mut [crate::types::game_state::LinkedExileSnapshot],
+    hidden_ids: &HashSet<ObjectId>,
+) {
+    for member in members.iter_mut() {
+        if hidden_ids.contains(&member.exiled_id) {
+            redact_linked_exile_snapshot(member);
+        }
+    }
+}
+
+/// Read-only twin of `redact_linked_exile_members`: does any member name a hidden card?
+fn linked_exile_names_hidden_member(
+    members: &[crate::types::game_state::LinkedExileSnapshot],
+    hidden_ids: &HashSet<ObjectId>,
+) -> bool {
+    members
+        .iter()
+        .any(|member| hidden_ids.contains(&member.exiled_id))
+}
+
+/// Blanks the hidden-source payment entries and zeroes hidden linked-exile members of one
+/// latched source context.
+fn redact_source_context_hidden_members(
+    context: &mut crate::types::game_state::TriggerSourceContext,
+    hidden_ids: &HashSet<ObjectId>,
+) {
+    redact_payment_source_snapshots(&mut context.mana_spent_source_snapshots, hidden_ids);
+    redact_linked_exile_members(&mut context.linked_exile_snapshot, hidden_ids);
+}
+
+/// Read-only twin of `redact_source_context_hidden_members`: does the context name a hidden
+/// mana source or a hidden linked-exile member?
+fn source_context_names_hidden_member(
+    context: &crate::types::game_state::TriggerSourceContext,
+    hidden_ids: &HashSet<ObjectId>,
+) -> bool {
+    payment_names_hidden_source(&context.mana_spent_source_snapshots, hidden_ids)
+        || linked_exile_names_hidden_member(&context.linked_exile_snapshot, hidden_ids)
+}
+
 /// A zone-change record of a public object latches the object's payment snapshots inside its
-/// trigger-source context; blank only the hidden-source entries there.
+/// trigger-source context, and the cards linked as exiled with it both on the record and in
+/// that context; blank only the hidden-source payment entries and zero only the hidden
+/// linked-exile members' mana values there.
 fn redact_record_payment(
     record: &mut crate::types::game_state::ZoneChangeRecord,
     hidden_ids: &HashSet<ObjectId>,
 ) {
+    redact_linked_exile_members(&mut record.linked_exile_snapshot, hidden_ids);
     if let Some(context) = record.trigger_source_context.as_mut() {
-        redact_payment_source_snapshots(&mut context.mana_spent_source_snapshots, hidden_ids);
+        redact_source_context_hidden_members(context, hidden_ids);
     }
 }
 
-/// A resolved ability latches its source's payment snapshots in `trigger_source`; blank only
-/// the hidden-source entries, across the whole sub/else chain.
+/// A resolved ability latches its source's payment snapshots and linked-exile members in
+/// `trigger_source`; blank only the hidden-source payment entries and zero only the hidden
+/// linked-exile members' mana values, across the whole sub/else chain.
 fn redact_ability_payment(
     ability: &mut crate::types::ability::ResolvedAbility,
     hidden_ids: &HashSet<ObjectId>,
 ) {
     if let Some(context) = ability.trigger_source.as_mut() {
-        redact_payment_source_snapshots(&mut context.mana_spent_source_snapshots, hidden_ids);
+        redact_source_context_hidden_members(context, hidden_ids);
     }
     if let Some(sub_ability) = ability.sub_ability.as_mut() {
         redact_ability_payment(sub_ability, hidden_ids);
@@ -3832,6 +3892,8 @@ fn redact_ability_payment(
 }
 
 /// Read-only twin of `redact_payment_source_snapshots`: does any entry name a hidden source?
+/// Payment only; a source context's selectors ask `source_context_names_hidden_member`,
+/// which also asks about hidden linked-exile members.
 fn payment_names_hidden_source(
     snapshots: &[crate::types::game_state::ManaSpentSourceSnapshot],
     hidden_ids: &HashSet<ObjectId>,
@@ -3841,23 +3903,27 @@ fn payment_names_hidden_source(
         .any(|snapshot| hidden_ids.contains(&snapshot.source_id))
 }
 
-/// Read-only twin of `redact_ability_payment`, over the same sub/else chain.
+/// Read-only twin of `redact_ability_payment`, over the same sub/else chain: does any
+/// `trigger_source` name a hidden mana source or a hidden linked-exile member?
 fn ability_payment_names_hidden_source(
     ability: &crate::types::ability::ResolvedAbility,
     hidden_ids: &HashSet<ObjectId>,
 ) -> bool {
-    ability.trigger_source.as_ref().is_some_and(|context| {
-        payment_names_hidden_source(&context.mana_spent_source_snapshots, hidden_ids)
-    }) || ability
-        .sub_ability
-        .as_deref()
-        .is_some_and(|sub_ability| ability_payment_names_hidden_source(sub_ability, hidden_ids))
+    ability
+        .trigger_source
+        .as_ref()
+        .is_some_and(|context| source_context_names_hidden_member(context, hidden_ids))
+        || ability
+            .sub_ability
+            .as_deref()
+            .is_some_and(|sub_ability| ability_payment_names_hidden_source(sub_ability, hidden_ids))
         || ability.else_ability.as_deref().is_some_and(|else_ability| {
             ability_payment_names_hidden_source(else_ability, hidden_ids)
         })
 }
 
-/// A paused cast keeps its spell ability; blank only its hidden-source payment entries.
+/// A paused cast keeps its spell ability; blank only its hidden-source payment entries and
+/// hidden linked-exile members' mana values.
 fn redact_pending_cast_payment(
     pending: &mut crate::types::game_state::PendingCast,
     hidden_ids: &HashSet<ObjectId>,
@@ -3927,8 +3993,9 @@ fn redact_mana_choice_context_payment(
 }
 
 /// CR 601.2h + CR 113.7a + CR 400.2: a prompt that pauses a resolving or casting ability
-/// retains that ability, including the payment snapshots its `trigger_source` latched.
-/// The prompt reaches every viewer, so a hidden mana source's entry is blanked there; the
+/// retains that ability, including the payment snapshots and linked-exile members its
+/// `trigger_source` latched. The prompt reaches every viewer, so a hidden mana source's
+/// entry is blanked there and a hidden linked-exile member's mana value is zeroed; the
 /// public ability spine (source, controller, effect, targets, description) is kept. The
 /// authoritative prompt keeps the full ability for resolution (CR 608.2h).
 ///
@@ -4013,7 +4080,8 @@ fn redact_waiting_for_payment(waiting_for: &mut WaitingFor, hidden_ids: &HashSet
 /// CR 601.2h + CR 113.7a + CR 400.2: the root-held paused abilities every viewer receives
 /// (a paused cast, a player-scope sacrifice or unless-payment, a scoped library search and
 /// its delivery, an Epic spell copy, and a resolution-installed prevention rider,
-/// CR 615.5). Only hidden-source payment entries are blanked.
+/// CR 615.5). Only hidden-source payment entries are blanked and hidden linked-exile
+/// members' mana values zeroed.
 fn redact_paused_ability_payment(state: &mut GameState, hidden_ids: &HashSet<ObjectId>) {
     if let Some(pending) = state.pending_cast.as_deref_mut() {
         redact_pending_cast_payment(pending, hidden_ids);
@@ -4089,7 +4157,8 @@ fn redact_paused_ability_payment(state: &mut GameState, hidden_ids: &HashSet<Obj
 /// - id-keyed LKI (`lki_cache`, `lki_by_incarnation`, `lki_copiable_values`,
 ///   `departed_stack_spells`, and `linked_exile_lki` keyed by a hidden source) is dropped;
 /// - a hidden `linked_exile_lki` member keeps its slot (the per-source count is read) but
-///   loses its mana value;
+///   loses its mana value, and the same rule applies to the `linked_exile_snapshot` vectors
+///   nested in zone-change records and source contexts;
 /// - cast-history records keep every characteristic the cast-history cost and count readers
 ///   filter on, and lose only the name and the id link (`redact_spell_cast_record`);
 /// - the turn's entry, sacrifice, damage, attack-declaration and counter-added ledgers keep
@@ -4154,11 +4223,7 @@ fn redact_hidden_identity_side_tables(state: &mut GameState, hidden_ids: &HashSe
         }
     }
     for members in state.linked_exile_lki.values_mut() {
-        for member in members.iter_mut() {
-            if hidden_ids.contains(&member.exiled_id) {
-                redact_linked_exile_snapshot(member);
-            }
-        }
+        redact_linked_exile_members(members, hidden_ids);
     }
 
     for records in state
@@ -5009,6 +5074,14 @@ mod tests {
     /// batch, an until-event effect, a departed entry's ability, sub-abilities). The waiting
     /// triggers are the opponent's, so the opponent's projection keeps their event carriers.
     /// Creation look-back events are not seeded.
+    ///
+    /// CR 406.3 + CR 406.3a + CR 607.2a: the seeded record also latches a
+    /// `linked_exile_snapshot` naming a face-down member the opponent may not look at and a
+    /// face-up member; every carrier zeroes only the hidden member's mana value. The
+    /// live-source producer `trigger_source_context_for_latch` (triggers.rs ~2103) writes the
+    /// same `ResolvedAbility.trigger_source` field. The registered Windbrisk board reaches
+    /// only the departure-record producer. The ability carrier is covered by the seeded
+    /// shape tests.
     #[test]
     fn public_carriers_blank_only_hidden_mana_source_payment_snapshots() {
         let mut state = GameState::new_two_player(42);
@@ -5059,7 +5132,7 @@ mod tests {
                 .expect("seeded object")
                 .mana_spent_source_snapshots = payment.clone();
         }
-        let record = state.objects[&paid].snapshot_for_zone_change(
+        let mut record = state.objects[&paid].snapshot_for_zone_change(
             paid,
             Some(Zone::Stack),
             Zone::Battlefield,
@@ -5072,6 +5145,13 @@ mod tests {
             Some(payment.clone()),
             "reach-guard: the zone-change record latches the payment"
         );
+        // CR 603.10a + CR 607.2a: the record (and, synced, its context) also latches the
+        // cards linked as exiled with the paid permanent, one of them face down and hidden
+        // from the opponent (CR 406.3). Seeded before any carrier below clones the record.
+        let linked = seed_linked_exile_members(&mut state, owner, paid);
+        let hidden_member = linked[0].exiled_id;
+        record.linked_exile_snapshot = linked.clone();
+        record.sync_trigger_source_context();
         let mut ability = ResolvedAbility::new(Effect::NoOp, Vec::new(), paid, owner);
         ability.trigger_source = record.trigger_source_context.clone();
         let chained = ability.clone();
@@ -5593,6 +5673,99 @@ mod tests {
             "authoritative state is untouched by the projection"
         );
 
+        // CR 406.3 + CR 406.3a: the linked-exile vectors ride the same carriers. Independent
+        // JSON key-walk oracle over the whole state; the visible member and every id, owner,
+        // slot and order survive, and only the hidden member's mana value is zeroed.
+        let raw_linked = linked_arrays_under(&state, "");
+        let raw_linked_paths: Vec<&String> = raw_linked.iter().map(|(path, _)| path).collect();
+        for prefix in [
+            "/zone_changes_this_turn/",
+            "/sacrificed_permanents_this_turn/",
+            "/stack/",
+            "/resolving_stack_entry/",
+            "/stack_trigger_event_batches/",
+            "/current_trigger_event/",
+            "/current_trigger_events/",
+            "/delayed_triggers/",
+            "/pending_trigger/",
+            "/deferred_triggers/",
+            "/pending_trigger_order/",
+            "/pending_trigger_event_batch/",
+            "/pending_attack_trigger_events/",
+            "/deferred_entry_events/",
+            "/consumed_before_priority_trigger_events/",
+            "/pending_player_scope_sacrifice_choice/",
+            "/waiting_for/",
+            "/transient_continuous_effects/",
+            "/departed_stack_spells/",
+        ] {
+            assert!(
+                raw_linked
+                    .iter()
+                    .any(|(path, carried)| path.starts_with(prefix) && carried == &linked),
+                "reach-guard: a raw `{prefix}` carrier latches the linked members; \
+                 paths: {raw_linked_paths:#?}"
+            );
+        }
+        for (path, carried) in &raw_linked {
+            assert!(
+                carried.is_empty() || carried == &linked,
+                "reach-guard: raw `{path}` holds the seeded members"
+            );
+        }
+        assert_eq!(
+            opponent.objects[&hidden_member].name, HIDDEN_CARD_NAME,
+            "reach-guard: the face-down member is hidden from the opponent"
+        );
+        let opponent_linked = linked_arrays_under(&opponent, "");
+        assert_eq!(
+            opponent_linked
+                .iter()
+                .map(|(path, _)| path)
+                .collect::<Vec<_>>(),
+            raw_linked_paths,
+            "opponent: every linked-exile carrier is kept"
+        );
+        assert_eq!(
+            assert_linked_members_zeroed(&raw_linked, &opponent_linked, hidden_member, "opponent"),
+            raw_linked
+                .iter()
+                .filter(|(_, carried)| !carried.is_empty())
+                .count(),
+            "opponent: the hidden member is zeroed in every carrier"
+        );
+        let spectator = filter_state_for_unseated_viewer(&state);
+        assert_eq!(
+            spectator.objects[&hidden_member].name, HIDDEN_CARD_NAME,
+            "reach-guard: the face-down member is hidden from a spectator"
+        );
+        assert!(
+            assert_linked_members_zeroed(
+                &raw_linked,
+                &linked_arrays_under(&spectator, ""),
+                hidden_member,
+                "spectator",
+            ) > 0,
+            "spectator: the hidden member is zeroed"
+        );
+        assert_eq!(
+            owner_view.objects[&hidden_member].name, "Secret Hideaway",
+            "reach-guard: the owner, a latched looker, may look at the face-down member"
+        );
+        for (path, carried) in linked_arrays_under(&owner_view, "") {
+            assert!(
+                raw_linked
+                    .iter()
+                    .any(|(raw_path, raw_members)| *raw_path == path && *raw_members == carried),
+                "owner keeps `{path}` intact"
+            );
+        }
+        assert_eq!(
+            linked_arrays_under(&state, ""),
+            raw_linked,
+            "authoritative linked-exile vectors are untouched by the projections"
+        );
+
         // The other prompts that hold a trigger event reach every viewer; each is seeded
         // alone because `waiting_for` holds one prompt. The unless-payment prompts'
         // `pending_effect` latches the payment too (its own rows are in
@@ -5664,6 +5837,32 @@ mod tests {
                 "reach-guard: the raw `{label}` names both sources"
             );
             let view = filter_state_for_viewer(&prompted, opponent_id);
+            let raw_prompt_linked = linked_arrays_under(&prompted, "/waiting_for/");
+            assert!(
+                raw_prompt_linked
+                    .iter()
+                    .any(|(_, carried)| carried == &linked),
+                "reach-guard: the raw `{label}` latches the linked members"
+            );
+            let prompt_linked = linked_arrays_under(&view, "/waiting_for/");
+            assert_eq!(
+                prompt_linked.len(),
+                raw_prompt_linked.len(),
+                "{label}: every linked-exile array is kept"
+            );
+            assert_eq!(
+                assert_linked_members_zeroed(
+                    &raw_prompt_linked,
+                    &prompt_linked,
+                    hidden_member,
+                    label
+                ),
+                raw_prompt_linked
+                    .iter()
+                    .filter(|(_, carried)| !carried.is_empty())
+                    .count(),
+                "{label}: the hidden linked member is zeroed in every array"
+            );
             let projected = carriers(&view);
             let Some((_, carried)) = projected.iter().find(|(carrier, _)| carrier == label) else {
                 panic!("the public `{label}` carrier is kept");
@@ -5695,9 +5894,168 @@ mod tests {
         }
     }
 
+    /// CR 406.3 + CR 406.3a: the three carriers whose copy-on-write pass first SELECTS what
+    /// to redact (a departed stack spell's entry ability, an object replacement rider, an
+    /// until-event effect's `duration_event_source`) latch a source context whose payment
+    /// names only a VISIBLE mana source but whose linked-exile vector names a face-down
+    /// member hidden from the opponent. The selectors must pick them by the linked member
+    /// alone, so the opponent and a spectator see only that member's mana value zeroed;
+    /// the owner (a latched looker) and authoritative state keep the real value.
+    #[test]
+    fn selector_gated_carriers_zero_hidden_linked_exile_member_without_hidden_payer() {
+        let mut state = GameState::new_two_player(42);
+        let owner = PlayerId(0);
+        let opponent_id = PlayerId(1);
+        let public_source = create_object(
+            &mut state,
+            CardId(12),
+            owner,
+            "Public Forest".to_string(),
+            Zone::Battlefield,
+        );
+        let paid = create_object(
+            &mut state,
+            CardId(13),
+            owner,
+            "Paid Permanent".to_string(),
+            Zone::Battlefield,
+        );
+        let departed = create_object(
+            &mut state,
+            CardId(14),
+            owner,
+            "Departed Spell".to_string(),
+            Zone::Graveyard,
+        );
+        state
+            .objects
+            .get_mut(&paid)
+            .expect("seeded object")
+            .mana_spent_source_snapshots = vec![ManaSpentSourceSnapshot {
+            source_id: public_source,
+            lki: state.objects[&public_source].snapshot_for_mana_spent(),
+        }];
+        let linked = seed_linked_exile_members(&mut state, owner, paid);
+        let hidden_member = linked[0].exiled_id;
+        let mut record = state.objects[&paid].snapshot_for_zone_change(
+            paid,
+            Some(Zone::Stack),
+            Zone::Battlefield,
+        );
+        record.linked_exile_snapshot = linked.clone();
+        record.sync_trigger_source_context();
+        let mut ability = ResolvedAbility::new(Effect::NoOp, Vec::new(), paid, owner);
+        ability.trigger_source = record.trigger_source_context.clone();
+        // The departed entry names the linked member only in its sub-ability.
+        let mut sub_only = ResolvedAbility::new(Effect::NoOp, Vec::new(), departed, owner);
+        sub_only.sub_ability = Some(Box::new(ability.clone()));
+        state.departed_stack_spells.insert(
+            departed,
+            im::HashMap::from(vec![(
+                1u64,
+                DepartedStackSpell {
+                    entry: StackEntry {
+                        id: departed,
+                        source_id: departed,
+                        controller: owner,
+                        kind: StackEntryKind::Spell {
+                            card_id: CardId(14),
+                            ability: Some(Box::new(sub_only)),
+                            casting_variant: CastingVariant::default(),
+                            actual_mana_spent: 2,
+                        },
+                    },
+                    object: Box::new(state.objects[&departed].clone()),
+                },
+            )]),
+        );
+        state
+            .objects
+            .get_mut(&paid)
+            .expect("paid object")
+            .replacement_definitions =
+            vec![ReplacementDefinition::new(ReplacementEvent::DamageDone)
+                .runtime_execute(ability.clone())]
+            .into();
+        state.transient_continuous_effects.push_back(
+            crate::types::game_state::TransientContinuousEffect {
+                id: 1,
+                source_id: paid,
+                controller: owner,
+                timestamp: 1,
+                duration: crate::types::ability::Duration::UntilEvent {
+                    event: Box::new(crate::types::ability::TriggerDefinition::new(
+                        crate::types::triggers::TriggerMode::ChangesZone,
+                    )),
+                },
+                affected: TargetFilter::SelfRef,
+                affected_recipient: None,
+                modifications: Vec::new(),
+                condition: None,
+                duration_subject: None,
+                duration_event_source: record.trigger_source_context.clone().map(Box::new),
+                end_permission: None,
+                granting_object: None,
+                source_name: "Paid Permanent".to_string(),
+            },
+        );
+
+        let opponent = filter_state_for_viewer(&state, opponent_id);
+        let spectator = filter_state_for_unseated_viewer(&state);
+        let owner_view = filter_state_for_viewer(&state, owner);
+        assert_eq!(
+            opponent.objects[&hidden_member].name, HIDDEN_CARD_NAME,
+            "reach-guard: the face-down member is hidden from the opponent"
+        );
+        assert_eq!(
+            opponent.objects[&public_source].name, "Public Forest",
+            "reach-guard: the only payer is visible, so no payment entry selects a carrier"
+        );
+        for prefix in [
+            format!("/departed_stack_spells/{}/", departed.0),
+            format!("/objects/{}/replacement_definitions/", paid.0),
+            "/transient_continuous_effects/".to_string(),
+        ] {
+            let raw = linked_arrays_under(&state, &prefix);
+            assert!(
+                !raw.is_empty() && raw.iter().all(|(_, carried)| carried == &linked),
+                "reach-guard: raw `{prefix}` latches both linked members: {raw:#?}"
+            );
+            for (viewer, view) in [("opponent", &opponent), ("spectator", &spectator)] {
+                let projected = linked_arrays_under(view, &prefix);
+                assert_eq!(
+                    projected.iter().map(|(path, _)| path).collect::<Vec<_>>(),
+                    raw.iter().map(|(path, _)| path).collect::<Vec<_>>(),
+                    "{viewer}: `{prefix}` keeps every linked-exile array"
+                );
+                assert_eq!(
+                    assert_linked_members_zeroed(
+                        &raw,
+                        &projected,
+                        hidden_member,
+                        &format!("{viewer} `{prefix}`"),
+                    ),
+                    raw.len(),
+                    "{viewer}: `{prefix}` zeroes the hidden linked member"
+                );
+            }
+            assert_eq!(
+                linked_arrays_under(&owner_view, &prefix),
+                raw,
+                "the owner keeps `{prefix}` intact"
+            );
+            assert_eq!(
+                linked_arrays_under(&state, &prefix),
+                raw,
+                "authoritative `{prefix}` is untouched"
+            );
+        }
+    }
+
     /// The payment fixture shared by the paused-ability carrier rows: a hidden mana source
     /// (`Secret Island`, in its owner's hand), a visible one (`Public Forest`), and a public
-    /// paid permanent whose two-node ability latches both payment entries.
+    /// paid permanent whose two-node ability latches both payment entries, and both members
+    /// of `linked` (a face-down card hidden from the opponent, a face-up card).
     struct PaymentFixture {
         state: GameState,
         owner: PlayerId,
@@ -5705,6 +6063,7 @@ mod tests {
         hidden_source: ObjectId,
         paid: ObjectId,
         payment: Vec<ManaSpentSourceSnapshot>,
+        linked: Vec<LinkedExileSnapshot>,
         ability: ResolvedAbility,
         event: GameEvent,
     }
@@ -5748,11 +6107,14 @@ mod tests {
             .get_mut(&paid)
             .expect("seeded object")
             .mana_spent_source_snapshots = payment.clone();
-        let record = state.objects[&paid].snapshot_for_zone_change(
+        let mut record = state.objects[&paid].snapshot_for_zone_change(
             paid,
             Some(Zone::Stack),
             Zone::Battlefield,
         );
+        let linked = seed_linked_exile_members(&mut state, owner, paid);
+        record.linked_exile_snapshot = linked.clone();
+        record.sync_trigger_source_context();
         let mut ability = ResolvedAbility::new(Effect::NoOp, Vec::new(), paid, owner);
         ability.trigger_source = record.trigger_source_context.clone();
         // A second payment-bearing node, so the chain walk is exercised too.
@@ -5770,6 +6132,7 @@ mod tests {
             hidden_source,
             paid,
             payment,
+            linked,
             ability,
             event,
         }
@@ -5782,28 +6145,47 @@ mod tests {
         state: &GameState,
         prefix: &str,
     ) -> Vec<(String, Vec<ManaSpentSourceSnapshot>)> {
-        fn walk(
+        key_arrays_under(state, "mana_spent_source_snapshots", prefix)
+    }
+
+    /// The same independent oracle over every `linked_exile_snapshot` array.
+    fn linked_arrays_under(
+        state: &GameState,
+        prefix: &str,
+    ) -> Vec<(String, Vec<LinkedExileSnapshot>)> {
+        key_arrays_under(state, "linked_exile_snapshot", prefix)
+    }
+
+    /// Every array under the JSON key `key`, at any depth of the state's JSON, whose path
+    /// starts with `prefix`, deserialized as `T`.
+    fn key_arrays_under<T: serde::de::DeserializeOwned>(
+        state: &GameState,
+        key: &str,
+        prefix: &str,
+    ) -> Vec<(String, Vec<T>)> {
+        fn walk<T: serde::de::DeserializeOwned>(
             value: &serde_json::Value,
+            key: &str,
             path: &str,
-            out: &mut Vec<(String, Vec<ManaSpentSourceSnapshot>)>,
+            out: &mut Vec<(String, Vec<T>)>,
         ) {
             match value {
                 serde_json::Value::Object(map) => {
                     for (name, child) in map {
                         let child_path = format!("{path}/{name}");
-                        if name == "mana_spent_source_snapshots" && child.is_array() {
+                        if name == key && child.is_array() {
                             out.push((
                                 child_path.clone(),
                                 serde_json::from_value(child.clone())
-                                    .expect("a payment snapshot array deserializes"),
+                                    .expect("a snapshot array deserializes"),
                             ));
                         }
-                        walk(child, &child_path, out);
+                        walk(child, key, &child_path, out);
                     }
                 }
                 serde_json::Value::Array(items) => {
                     for (index, child) in items.iter().enumerate() {
-                        walk(child, &format!("{path}/{index}"), out);
+                        walk(child, key, &format!("{path}/{index}"), out);
                     }
                 }
                 _ => {}
@@ -5812,11 +6194,100 @@ mod tests {
         let mut out = Vec::new();
         walk(
             &serde_json::to_value(state).expect("state serializes"),
+            key,
             "",
             &mut out,
         );
         out.retain(|(path, _)| path.starts_with(prefix));
         out
+    }
+
+    /// Two cards linked as exiled with `source`: a face-down card only its owner may look
+    /// at (CR 406.3: a `HideawayLookable` link latching the owner as a looker) and a face-up
+    /// card. Returns the latched member vector `[hidden (mana value 4), public (mana value 3)]`.
+    fn seed_linked_exile_members(
+        state: &mut GameState,
+        owner: PlayerId,
+        source: ObjectId,
+    ) -> Vec<LinkedExileSnapshot> {
+        let hidden = create_object(
+            state,
+            CardId(15),
+            owner,
+            "Secret Hideaway".to_string(),
+            Zone::Exile,
+        );
+        state
+            .objects
+            .get_mut(&hidden)
+            .expect("seeded object")
+            .face_down = true;
+        let public = create_object(
+            state,
+            CardId(16),
+            owner,
+            "Public Exile".to_string(),
+            Zone::Exile,
+        );
+        state.exile_links.push(crate::types::game_state::ExileLink {
+            exiled_id: hidden,
+            source_id: source,
+            kind: crate::types::game_state::ExileLinkKind::HideawayLookable {
+                grant: crate::types::game_state::LookGrant::Player { player: owner },
+                lookers: std::collections::BTreeSet::from([owner]),
+                source_incarnation: 0,
+            },
+        });
+        vec![
+            LinkedExileSnapshot {
+                exiled_id: hidden,
+                owner,
+                mana_value: 4,
+            },
+            LinkedExileSnapshot {
+                exiled_id: public,
+                owner,
+                mana_value: 3,
+            },
+        ]
+    }
+
+    /// Every projected linked-exile array sits at a raw path with the same length, ids,
+    /// owners and order; a member naming `hidden` has only its mana value zeroed and every
+    /// other member equals the raw member. Returns how many hidden members were checked.
+    fn assert_linked_members_zeroed(
+        raw: &[(String, Vec<LinkedExileSnapshot>)],
+        projected: &[(String, Vec<LinkedExileSnapshot>)],
+        hidden: ObjectId,
+        label: &str,
+    ) -> usize {
+        let mut zeroed = 0;
+        for (path, carried) in projected {
+            let Some((_, raw_members)) = raw.iter().find(|(raw_path, _)| raw_path == path) else {
+                panic!("{label}: projected `{path}` has no raw counterpart");
+            };
+            assert_eq!(carried.len(), raw_members.len(), "{label} {path}: length");
+            for (member, raw_member) in carried.iter().zip(raw_members) {
+                if raw_member.exiled_id == hidden {
+                    assert_eq!(
+                        *member,
+                        LinkedExileSnapshot {
+                            exiled_id: raw_member.exiled_id,
+                            owner: raw_member.owner,
+                            mana_value: 0,
+                        },
+                        "{label} {path}: the hidden member keeps id and owner, loses its mana value"
+                    );
+                    zeroed += 1;
+                } else {
+                    assert_eq!(
+                        member, raw_member,
+                        "{label} {path}: a visible member is unchanged"
+                    );
+                }
+            }
+        }
+        zeroed
     }
 
     fn payment_mana_ability(fixture: &PaymentFixture) -> Box<PendingManaAbility> {
@@ -5852,7 +6323,8 @@ mod tests {
     /// paused ability (and paused mana ability) that a viewer receives blanks ONLY the
     /// payment entry of a mana source now hidden from that viewer, keeping ids, slots,
     /// order and the visible sibling; the owner keeps the full vector and the
-    /// authoritative state is untouched. SHAPE test with an independent JSON-walk oracle:
+    /// authoritative state is untouched. The same rows zero only the hidden member's mana
+    /// value in every latched `linked_exile_snapshot` (CR 406.3). SHAPE test with an independent JSON-walk oracle:
     /// each carrier is seeded alone on a clone of the fixture. The `PayCost` and
     /// `CostTypeChoice` rows are viewed by an opponent who cannot see the caster's hand,
     /// so the projection rebuilds those prompts from authoritative state; they fail if the
@@ -6299,6 +6771,20 @@ mod tests {
                     "reach-guard: raw `{label}` {path} names both sources"
                 );
             }
+            // CR 406.3: every source context there also latches the linked members (a
+            // trigger event's record adds its own record-level array).
+            let raw_linked = linked_arrays_under(&state, prefix);
+            assert!(
+                raw_linked.len() >= *expected,
+                "reach-guard: `{label}` seeds a linked-exile array per source context: \
+                 {raw_linked:#?}"
+            );
+            for (path, carried) in &raw_linked {
+                assert_eq!(
+                    carried, &fixture.linked,
+                    "reach-guard: raw `{label}` {path} latches both linked members"
+                );
+            }
 
             for (viewer, view) in [
                 ("opponent", filter_state_for_viewer(&state, opponent_id)),
@@ -6351,6 +6837,29 @@ mod tests {
                         "{viewer} `{label}` {path}: the visible mana source's entry is kept"
                     );
                 }
+                assert_eq!(
+                    view.objects[&fixture.linked[0].exiled_id].name, HIDDEN_CARD_NAME,
+                    "reach-guard ({viewer}): the face-down linked member is hidden"
+                );
+                let projected_linked = linked_arrays_under(&view, prefix);
+                assert_eq!(
+                    projected_linked
+                        .iter()
+                        .map(|(path, _)| path)
+                        .collect::<Vec<_>>(),
+                    raw_linked.iter().map(|(path, _)| path).collect::<Vec<_>>(),
+                    "{viewer}: `{label}` keeps every linked-exile array"
+                );
+                assert_eq!(
+                    assert_linked_members_zeroed(
+                        &raw_linked,
+                        &projected_linked,
+                        fixture.linked[0].exiled_id,
+                        &format!("{viewer} `{label}`"),
+                    ),
+                    raw_linked.len(),
+                    "{viewer}: `{label}` zeroes the hidden linked member in every array"
+                );
             }
             assert_eq!(
                 payment_arrays_under(&filter_state_for_viewer(&state, owner), prefix),
@@ -6358,9 +6867,19 @@ mod tests {
                 "the owner keeps `{label}` intact"
             );
             assert_eq!(
+                linked_arrays_under(&filter_state_for_viewer(&state, owner), prefix),
+                raw_linked,
+                "the owner, a latched looker, keeps `{label}`'s linked members intact"
+            );
+            assert_eq!(
                 payment_arrays_under(&state, prefix),
                 raw,
                 "authoritative `{label}` is untouched by the projections"
+            );
+            assert_eq!(
+                linked_arrays_under(&state, prefix),
+                raw_linked,
+                "authoritative `{label}` linked members are untouched by the projections"
             );
         }
 
