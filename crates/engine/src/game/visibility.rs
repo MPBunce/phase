@@ -4163,8 +4163,9 @@ fn redact_paused_ability_payment(state: &mut GameState, hidden_ids: &HashSet<Obj
 ///   filter on, and lose only the name and the id link (`redact_spell_cast_record`);
 /// - the turn's entry, sacrifice, damage, attack-declaration and counter-added ledgers keep
 ///   every record (counts are preserved) with the hidden object's identifying fields blanked;
-/// - a public departed stack spell keeps its entry, and only the payment snapshots naming a
-///   hidden mana source are blanked (`redact_payment_source_snapshots`).
+/// - a public departed stack spell keeps its entry; only the payment snapshots naming a
+///   hidden mana source are blanked (`redact_payment_source_snapshots`) and, in its entry
+///   ability's latched source contexts, the hidden linked-exile members' mana values are zeroed.
 ///
 /// Accepted limitation: the battlefield-entry, sacrifice, damage and counter-added ledgers
 /// are blanked projection-wide, including the characteristic columns (`core_types`, mana
