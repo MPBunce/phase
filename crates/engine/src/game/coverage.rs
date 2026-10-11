@@ -19,10 +19,10 @@ use crate::parser::oracle_ir::diagnostic::{ClauseGap, ClauseGapKind, OracleDiagn
 use crate::parser::oracle_util::normalize_card_name_refs;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityUseTally,
-    ActivationRestriction, AdditionalCost, AggregateFunction, AttackSubject, AttackedYouScope,
-    AttackerBlockStatus, CardTypeSetSource, ChoiceType, CoinFlipResult, CombatHistoryScope,
-    CommanderOwnership, Comparator, ContinuousModification, ControllerRef, CountScope,
-    CounterKindChooser, CounterKindDomain, CounterSourceRider, DelayedTriggerCondition,
+    ActivationRestriction, AdditionalCost, AggregateFunction, AttachmentReferent, AttackSubject,
+    AttackedYouScope, AttackerBlockStatus, CardTypeSetSource, ChoiceType, CoinFlipResult,
+    CombatHistoryScope, CommanderOwnership, Comparator, ContinuousModification, ControllerRef,
+    CountScope, CounterKindChooser, CounterKindDomain, CounterSourceRider, DelayedTriggerCondition,
     DieRollModifier, DoublePTMode, Duration, EachDamageRecipient, Effect, EffectOutcomeSignal,
     EffectScope, FilterProp, ForEachCategoryAction, GameRestriction, LetterQuery, LibraryPosition,
     ManaProduction, MassLibraryShuffleMode, NameStickerSet, ObjectProperty, ObjectScope,
@@ -770,6 +770,7 @@ fn fmt_target(filter: &TargetFilter) -> String {
         TargetFilter::DefendingPlayer => "defending player".into(),
         TargetFilter::ParentTarget => "parent target".into(),
         TargetFilter::ParentTargetSlot { index } => format!("parent target slot {index}"),
+        TargetFilter::DeclaredPlayer { .. } => "declared player".to_string(),
         TargetFilter::ParentTargetController => "parent target's controller".into(),
         TargetFilter::ParentTargetOwner => "parent target's owner".into(),
         TargetFilter::SourceChosenPlayer => "source's chosen player".into(),
@@ -956,11 +957,18 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
             FilterProp::Foretold => parts.push("foretold".into()),
             FilterProp::EnchantedBy => parts.push("enchanted by self".into()),
             FilterProp::EquippedBy => parts.push("equipped by self".into()),
-            FilterProp::AttachedToSource => parts.push("attached to self".into()),
-            FilterProp::AttachedToRecipient => parts.push("attached to it".into()),
-            FilterProp::AttachedToPlayer { player } => {
-                parts.push(format!("attached to {}", fmt_controller(player)))
-            }
+            FilterProp::AttachedTo {
+                to: AttachmentReferent::Source,
+            } => parts.push("attached to self".into()),
+            FilterProp::AttachedTo {
+                to: AttachmentReferent::Recipient,
+            } => parts.push("attached to it".into()),
+            FilterProp::AttachedTo {
+                to: AttachmentReferent::Player { player },
+            } => parts.push(format!("attached to {}", fmt_controller(player))),
+            FilterProp::AttachedTo {
+                to: AttachmentReferent::DeclaredTarget { slot },
+            } => parts.push(format!("attached to target #{slot}")),
             FilterProp::Unpaired => parts.push("unpaired".into()),
             FilterProp::HasAttachment {
                 kind,
@@ -1069,6 +1077,7 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                     ControllerRef::ScopedPlayer => "that player's",
                     ControllerRef::TargetPlayer => "target player's",
                     ControllerRef::TargetOpponent => "target opponent's",
+                    ControllerRef::DeclaredPlayer { .. } => "that player's",
                     ControllerRef::ParentTargetController => "parent target's",
                     ControllerRef::EventTargetController => "the damaged object's controller's",
                     ControllerRef::ParentTargetOwner => "parent target owner's",
@@ -1218,6 +1227,7 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
             }
             FilterProp::HasSingleTarget => parts.push("single target".into()),
             FilterProp::Modal => parts.push("modal spell".into()),
+            FilterProp::PrepareSpell => parts.push("prepared spell".into()),
             FilterProp::FaceDown => parts.push("face-down".into()),
             FilterProp::Transformed => parts.push("transformed".into()),
             FilterProp::TargetsOnly { filter } => {
@@ -1260,6 +1270,7 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                 ControllerRef::ScopedPlayer => "scoped player",
                 ControllerRef::TargetPlayer => "target player",
                 ControllerRef::TargetOpponent => "target opponent",
+                ControllerRef::DeclaredPlayer { .. } => "that player",
                 ControllerRef::ParentTargetController => "parent target's controller",
                 ControllerRef::EventTargetController => {
                     "controller of the object the triggering event targeted"
@@ -1340,6 +1351,7 @@ fn fmt_controller(ctrl: &ControllerRef) -> String {
         ControllerRef::ScopedPlayer => "scoped player controls",
         ControllerRef::TargetPlayer => "target player controls",
         ControllerRef::TargetOpponent => "target opponent controls",
+        ControllerRef::DeclaredPlayer { .. } => "that player controls",
         ControllerRef::ParentTargetController => "parent target's controller controls",
         ControllerRef::EventTargetController => {
             "the controller of the object the triggering event targeted controls"
@@ -4299,9 +4311,16 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         Effect::Tribute { count } => {
             d.push(("count".into(), count.to_string()));
         }
-        Effect::BecomePrepared { target }
-        | Effect::BecomeUnprepared { target }
-        | Effect::BecomeSaddled { target }
+        // CR 722.3a/b + CR 115.10a: key the subject by scope exactly as `ForceAttack`
+        // does — a declared/anaphoric `target` vs an untargeted population `filter`.
+        Effect::BecomePrepared { target, scope } | Effect::BecomeUnprepared { target, scope } => {
+            let subject_key = match scope {
+                EffectScope::Single => "target",
+                EffectScope::All => "filter",
+            };
+            d.push((subject_key.into(), fmt_target(target)));
+        }
+        Effect::BecomeSaddled { target }
         | Effect::BecomeBlocked { target }
         | Effect::PairWith { target } => {
             d.push(("target".into(), fmt_target(target)));
@@ -14867,6 +14886,40 @@ mod tests {
         let all = keys(EffectScope::All);
         assert!(all.iter().any(|k| k == "filter"));
         assert!(!all.iter().any(|k| k == "target"));
+    }
+
+    /// CR 722.3a/b + CR 115.10a: a mass "each creature you control becomes
+    /// (un)prepared" keys its subject as `filter`, a declared/anaphoric subject as
+    /// `target`, so `coverage-parse-diff` sees a Single → All reclassification.
+    #[test]
+    fn become_prepared_signature_keys_subject_by_scope() {
+        let subject = || TargetFilter::Typed(TypedFilter::creature());
+        let keys = |effect: Effect| -> Vec<String> {
+            effect_details(&effect)
+                .into_iter()
+                .map(|(k, _)| k)
+                .collect()
+        };
+        for scope in [EffectScope::Single, EffectScope::All] {
+            for effect in [
+                Effect::BecomePrepared {
+                    target: subject(),
+                    scope,
+                },
+                Effect::BecomeUnprepared {
+                    target: subject(),
+                    scope,
+                },
+            ] {
+                let got = keys(effect);
+                let (want, absent) = match scope {
+                    EffectScope::Single => ("target", "filter"),
+                    EffectScope::All => ("filter", "target"),
+                };
+                assert!(got.iter().any(|k| k == want), "{scope:?}: {got:?}");
+                assert!(!got.iter().any(|k| k == absent), "{scope:?}: {got:?}");
+            }
+        }
     }
 
     #[test]
