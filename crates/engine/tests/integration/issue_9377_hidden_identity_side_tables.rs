@@ -176,6 +176,10 @@ fn assert_raw_spell_tables_name(state: &GameState, id: ObjectId, name: &str, man
         "reach-guard: raw lki_copiable_values holds {name}"
     );
     assert!(
+        state.lki_copiable_values_by_incarnation.contains_key(&id),
+        "reach-guard: raw lki_copiable_values_by_incarnation holds {name}"
+    );
+    assert!(
         state.departed_stack_spells.contains_key(&id),
         "reach-guard: raw departed_stack_spells holds {name}"
     );
@@ -218,6 +222,10 @@ fn assert_projection_redacts_spell(
     assert!(
         !view.lki_copiable_values.contains_key(&id),
         "{label}: lki_copiable_values still holds the hidden id"
+    );
+    assert!(
+        !view.lki_copiable_values_by_incarnation.contains_key(&id),
+        "{label}: lki_copiable_values_by_incarnation still holds the hidden id"
     );
     assert!(
         !view.departed_stack_spells.contains_key(&id),
@@ -270,6 +278,10 @@ fn assert_projection_keeps_spell(view: &GameState, id: ObjectId, name: &str, lab
     assert!(
         view.lki_copiable_values.contains_key(&id),
         "{label}: lki_copiable_values kept"
+    );
+    assert!(
+        view.lki_copiable_values_by_incarnation.contains_key(&id),
+        "{label}: lki_copiable_values_by_incarnation kept"
     );
     assert!(
         view.departed_stack_spells.contains_key(&id),
@@ -791,10 +803,12 @@ fn hideaway_source_leaving_blanks_hidden_linked_exile_member() {
         raw.objects[&shock].face_down,
         "reach-guard: hidden face down"
     );
-    let raw_members = raw
+    let raw_entries = raw
         .linked_exile_lki
         .get(&windbrisk)
         .expect("reach-guard: Windbrisk's departure wrote linked_exile_lki");
+    assert_eq!(raw_entries.len(), 1, "reach-guard: one departure entry");
+    let raw_members = &raw_entries[0].snapshot;
     assert_eq!(raw_members.len(), 2, "reach-guard: both members");
     let mv = |members: &[engine::types::game_state::LinkedExileSnapshot], id: ObjectId| {
         members
@@ -810,10 +824,17 @@ fn hideaway_source_leaving_blanks_hidden_linked_exile_member() {
         p1.objects[&shock].name, HIDDEN,
         "reach-guard: member hidden"
     );
-    let members = p1
+    let entries = p1
         .linked_exile_lki
         .get(&windbrisk)
         .expect("a public source keeps its linked-exile entry");
+    assert_eq!(entries.len(), 1, "linked-exile entry count preserved");
+    assert_eq!(
+        (entries[0].departed, entries[0].successor),
+        (raw_entries[0].departed, raw_entries[0].successor),
+        "incarnation bounds kept"
+    );
+    let members = &entries[0].snapshot;
     assert_eq!(members.len(), 2, "linked-exile count preserved");
     assert_eq!(mv(members, shock), Some(0), "hidden member loses its mv");
     assert_eq!(mv(members, lapse), Some(2), "public member keeps its mv");
@@ -1161,13 +1182,14 @@ fn hideaway_source_bounced_to_hand_drops_linked_exile_entry() {
         raw.objects[&shock].face_down,
         "reach-guard: hidden face down"
     );
-    let raw_members = raw
+    let raw_entries = raw
         .linked_exile_lki
         .get(&windbrisk)
         .expect("reach-guard: Windbrisk's bounce wrote linked_exile_lki");
     assert_eq!(
-        raw_members
+        raw_entries
             .iter()
+            .flat_map(|entry| &entry.snapshot)
             .find(|m| m.exiled_id == shock)
             .map(|m| m.mana_value),
         Some(1),
@@ -1657,8 +1679,7 @@ fn activate_lands(runner: &mut GameRunner, lands: &[ObjectId]) {
         .find(|p| p.id == P0)
         .expect("P0 exists")
         .mana_pool
-        .mana
-        .iter()
+        .units()
         .map(|unit| unit.source_id)
         .collect();
     sources.sort();

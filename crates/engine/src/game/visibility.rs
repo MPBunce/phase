@@ -3976,7 +3976,9 @@ fn redact_pending_mana_ability_payment(
 }
 
 /// CR 118.12a + CR 605.3b: an unless-payment (or effect cost) paid through a mana ability
-/// that paused keeps the paused ability, and an unless-payment keeps its trigger event.
+/// that paused keeps the paused ability, and an unless-payment keeps its trigger event. A
+/// mana ability activated inside another's payment window keeps that outer
+/// `PendingManaAbility`, redacted the same way.
 fn redact_mana_ability_resume_payment(
     resume: &mut crate::types::game_state::ManaAbilityResume,
     hidden_ids: &HashSet<ObjectId>,
@@ -3996,6 +3998,10 @@ fn redact_mana_ability_resume_payment(
         ManaAbilityResume::EffectPayCost { ability, .. } => {
             redact_ability_payment(ability, hidden_ids);
         }
+        // CR 605.3a: the outer mana ability whose payment window this one was activated in.
+        ManaAbilityResume::ManaAbilityManaPayment {
+            pending_mana_ability,
+        } => redact_pending_mana_ability_payment(pending_mana_ability, hidden_ids),
         // Keep this complete rather than using a catch-all: a new resume must decide
         // whether it retains an ability. None of these holds one.
         ManaAbilityResume::Priority
@@ -4186,7 +4192,8 @@ fn redact_paused_ability_payment(state: &mut GameState, hidden_ids: &HashSet<Obj
 ///
 /// Policy, per table:
 /// - id-keyed LKI (`lki_cache`, `lki_by_incarnation`, `lki_copiable_values`,
-///   `departed_stack_spells`, and `linked_exile_lki` keyed by a hidden source) is dropped;
+///   `lki_copiable_values_by_incarnation`, `departed_stack_spells`, and `linked_exile_lki`
+///   keyed by a hidden source) is dropped;
 /// - a hidden `linked_exile_lki` member keeps its slot (the per-source count is read) but
 ///   loses its mana value, and the same rule applies to the `linked_exile_snapshot` vectors
 ///   nested in zone-change records and source contexts;
@@ -4215,6 +4222,7 @@ fn redact_hidden_identity_side_tables(state: &mut GameState, hidden_ids: &HashSe
         state.lki_by_incarnation.remove(id);
         // CR 707.2: copiable values are the hidden card's printed identity.
         state.lki_copiable_values.remove(id);
+        state.lki_copiable_values_by_incarnation.remove(id);
         state.departed_stack_spells.remove(id);
         state.linked_exile_lki.remove(id);
     }
@@ -4254,8 +4262,17 @@ fn redact_hidden_identity_side_tables(state: &mut GameState, hidden_ids: &HashSe
             }
         }
     }
-    for members in state.linked_exile_lki.values_mut() {
-        redact_linked_exile_members(members, hidden_ids);
+    // Each entry keeps its incarnation bounds (`departed`, `successor`); only the hidden
+    // members of its snapshot lose their mana value.
+    for entries in state.linked_exile_lki.values_mut() {
+        for lki in entries.iter_mut() {
+            let crate::types::game_state::LinkedExileLki {
+                departed: _,
+                successor: _,
+                snapshot,
+            } = lki;
+            redact_linked_exile_members(snapshot, hidden_ids);
+        }
     }
 
     for records in state
@@ -4354,7 +4371,8 @@ fn redact_linked_exile_snapshot(member: &mut crate::types::game_state::LinkedExi
 /// the spell was cast. Only the name and the id link that ties the record to the now-hidden
 /// object are cleared; with no id the record is an anonymous history entry. A same-id record
 /// for a hidden object denotes a prior object, so clearing the link never changes an
-/// own-cast exclusion for a spell still on the stack.
+/// own-cast exclusion for a spell still on the stack. `prepared_copy_source` is an id-only
+/// link (no name, characteristics or LKI) and is kept; stable-id tracking is out of scope.
 fn redact_spell_cast_record(record: &mut crate::types::game_state::SpellCastRecord) {
     let crate::types::game_state::SpellCastRecord {
         name,
@@ -4370,6 +4388,8 @@ fn redact_spell_cast_record(record: &mut crate::types::game_state::SpellCastReco
         cast_variant: _,
         was_kicked: _,
         spell_object_id,
+        // An id-only link kept as-is; stable-id tracking is out of scope.
+        prepared_copy_source: _,
     } = record;
     *name = HIDDEN_CARD_NAME.to_string();
     *spell_object_id = None;
@@ -4799,9 +4819,9 @@ mod tests {
     use crate::types::game_state::{
         ActiveLibrarySearch, AutoMayChoice, BattlefieldEntryRecord, CastPaymentMode,
         CastingVariant, CostResume, CounterAddedRecord, DamageRecord, DelayedTrigger,
-        DepartedStackSpell, FrozenScopedSearchFoundDisposition, LinkedExileSnapshot,
-        ManaAbilityCostCursor, ManaAbilityCostResolutionMode, ManaAbilityResume,
-        ManaSpentSourceSnapshot, MayTriggerAutoChoiceKey, MayTriggerOrigin,
+        DepartedStackSpell, FrozenScopedSearchFoundDisposition, LinkedExileLki,
+        LinkedExileSnapshot, ManaAbilityCostCursor, ManaAbilityCostResolutionMode,
+        ManaAbilityResume, ManaSpentSourceSnapshot, MayTriggerAutoChoiceKey, MayTriggerOrigin,
         PendingBeginGameAbility, PendingCast, PendingCostMoveCompletion, PendingCostMoveResume,
         PendingManaAbility, PendingSacrificeCostCompletion, PendingScopedLibrarySearch,
         PendingSearchFoundBatch, PendingTriggerOrder, PreparedScopedLibrarySearchChoice,
@@ -4901,7 +4921,7 @@ mod tests {
             .push_back(cast);
         state
             .battlefield_entries_this_turn
-            .push(BattlefieldEntryRecord {
+            .push_back(BattlefieldEntryRecord {
                 object_id: secret,
                 name: "Ledger Sentinel".to_string(),
                 core_types: vec![CoreType::Creature],
@@ -4919,18 +4939,22 @@ mod tests {
             });
         state.linked_exile_lki.insert(
             ObjectId(9_999),
-            vec![
-                LinkedExileSnapshot {
-                    exiled_id: secret,
-                    owner,
-                    mana_value: 4,
-                },
-                LinkedExileSnapshot {
-                    exiled_id: public_member,
-                    owner,
-                    mana_value: 3,
-                },
-            ],
+            vec![LinkedExileLki {
+                departed: 1,
+                successor: 2,
+                snapshot: vec![
+                    LinkedExileSnapshot {
+                        exiled_id: secret,
+                        owner,
+                        mana_value: 4,
+                    },
+                    LinkedExileSnapshot {
+                        exiled_id: public_member,
+                        owner,
+                        mana_value: 3,
+                    },
+                ],
+            }],
         );
         state.damage_dealt_this_turn.push_back(DamageRecord {
             source_id: secret,
@@ -4965,10 +4989,10 @@ mod tests {
         };
         state
             .counter_added_this_turn
-            .push(counter_record(secret, "Ledger Sentinel"));
+            .push_back(counter_record(secret, "Ledger Sentinel"));
         state
             .counter_added_this_turn
-            .push(counter_record(public_member, "Public Exile Member"));
+            .push_back(counter_record(public_member, "Public Exile Member"));
 
         // Reach-guards: every seeded record names the card before projection.
         assert_eq!(
@@ -4983,7 +5007,10 @@ mod tests {
             state.attacker_declarations_this_turn[0].lki.name,
             "Ledger Sentinel"
         );
-        assert_eq!(state.linked_exile_lki[&ObjectId(9_999)][0].mana_value, 4);
+        assert_eq!(
+            state.linked_exile_lki[&ObjectId(9_999)][0].snapshot[0].mana_value,
+            4
+        );
         assert_eq!(state.counter_added_this_turn[0].name, "Ledger Sentinel");
 
         let opponent = filter_state_for_viewer(&state, opponent_id);
@@ -5027,7 +5054,14 @@ mod tests {
             HIDDEN_CARD_NAME
         );
 
-        let members = &opponent.linked_exile_lki[&ObjectId(9_999)];
+        let entries = &opponent.linked_exile_lki[&ObjectId(9_999)];
+        assert_eq!(entries.len(), 1, "the linked-exile entry is kept");
+        assert_eq!(
+            (entries[0].departed, entries[0].successor),
+            (1, 2),
+            "the incarnation bounds are not identity"
+        );
+        let members = &entries[0].snapshot;
         assert_eq!(members.len(), 2, "the linked-exile count is preserved");
         assert_eq!(
             members[0].mana_value, 0,
@@ -6563,6 +6597,24 @@ mod tests {
                 }),
             ),
             (
+                // CR 605.3a: a mana ability activated inside another's payment window
+                // resumes that outer (payment-bearing) activation.
+                "PayManaAbilityMana ManaAbilityManaPayment resume",
+                "/waiting_for/".to_string(),
+                5,
+                prompt(WaitingFor::PayManaAbilityMana {
+                    player: owner,
+                    options: Vec::new(),
+                    pending_mana_ability: {
+                        let mut inner = dummy_pending_mana_ability(owner, ObjectId(9_901));
+                        inner.resume = ManaAbilityResume::ManaAbilityManaPayment {
+                            pending_mana_ability: mana_ability(),
+                        };
+                        inner
+                    },
+                }),
+            ),
+            (
                 "PayAmountChoice",
                 "/waiting_for/".to_string(),
                 5,
@@ -6943,7 +6995,7 @@ mod tests {
             source_id: paid,
             branches: Vec::new(),
             branch_descriptions: Vec::new(),
-            parent_targets: Vec::new(),
+            parent_occurrences: Default::default(),
             context: Default::default(),
             continuation: Some(effect()),
             replacement_applied: Default::default(),
