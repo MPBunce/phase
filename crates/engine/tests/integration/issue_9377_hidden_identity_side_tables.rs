@@ -25,17 +25,19 @@
 use engine::game::casting::display_spell_cost;
 use engine::game::combat::AttackTarget;
 use engine::game::derived_views::{derive_views, ClientGameStateRef};
+use engine::game::mana_abilities::is_mana_ability;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::game::visibility::{filter_state_for_unseated_viewer, filter_state_for_viewer};
-use engine::types::ability::TargetRef;
+use engine::types::ability::{AbilityKind, ResolvedAbility, TargetRef};
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
 use engine::types::game_state::{
     CastPaymentMode, CounterAddedRecord, ExileLink, ExileLinkKind, GameState, LinkedExileSnapshot,
-    ManaSpentSourceSnapshot, PayCostKind, StackEntryKind, WaitingFor, ZoneChangeRecord,
+    ManaAbilityResume, ManaSpentSourceSnapshot, PayCostKind, PendingManaAbility, StackEntryKind,
+    WaitingFor, ZoneChangeRecord,
 };
 use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
@@ -2494,6 +2496,42 @@ fn payment_snapshot_census_blanks_hidden_source_in_every_wire_form() {
         ],
         "sub-case C",
     );
+
+    // Sub-case D: board H7, the same board with Pili-Pala's mana payment window
+    // open over the unless-payment prompt.
+    let Some((
+        TitanTaxBoard {
+            runner,
+            titan,
+            forests,
+            island_a,
+            island_b,
+        },
+        _architect,
+        _pili,
+    )) = frost_titan_pili_pala_window_after_island_bounced()
+    else {
+        return;
+    };
+    let titan_path = format!("/objects/{}/mana_spent_source_snapshots", titan.0);
+    let titan_object_path = |path: &str| path == titan_path;
+    let window_path = |path: &str| path.starts_with("/waiting_for/") && is_window_path(path);
+    let mut visible: Vec<(ObjectId, &str)> = forests.iter().map(|id| (*id, "Forest")).collect();
+    visible.push((island_b, "Island"));
+    assert_payment_census(
+        runner.state(),
+        island_a,
+        &visible,
+        &[
+            ("objects[titan]", &titan_object_path),
+            ("zone_changes_this_turn", &journal_path),
+            (
+                "waiting_for pending_mana_ability pending_effect",
+                &window_path,
+            ),
+        ],
+        "sub-case D",
+    );
 }
 
 /// Test H5: CR 601.2h + CR 400.2: the sacrifice ledger's record of a paid
@@ -2588,6 +2626,22 @@ struct TitanTaxBoard {
 }
 
 fn frost_titan_tax_prompt_after_island_bounced() -> Option<TitanTaxBoard> {
+    titan_tax_board(TaxPayer::PoolFunded).map(|(board, _)| board)
+}
+
+/// How P1, the Bolt's controller, is set up to answer the Titan's {2} tax.
+enum TaxPayer {
+    /// The pool holds the {2} (board H6).
+    PoolFunded,
+    /// P1 controls Grand Architect and Pili-Pala, no land, and an empty pool
+    /// after the Bolt, so activating Pili-Pala's "{2}, {Q}: Add one mana of any
+    /// color." at the prompt opens its mana payment window.
+    ArtifactManaWindow,
+}
+
+/// Board H6, with the payer set up per `setup`. For `ArtifactManaWindow` the
+/// second value is `(grand_architect, pili_pala)`.
+fn titan_tax_board(setup: TaxPayer) -> Option<(TitanTaxBoard, Option<(ObjectId, ObjectId)>)> {
     let db = load_db()?;
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
@@ -2600,6 +2654,13 @@ fn frost_titan_tax_prompt_after_island_bounced() -> Option<TitanTaxBoard> {
     let capsize = scenario.add_real_card(P0, "Capsize", Zone::Hand, db);
     let bears = scenario.add_real_card(P1, "Grizzly Bears", Zone::Battlefield, db);
     let bolt = scenario.add_real_card(P1, "Lightning Bolt", Zone::Hand, db);
+    let artifact_mana = match setup {
+        TaxPayer::PoolFunded => None,
+        TaxPayer::ArtifactManaWindow => Some((
+            scenario.add_real_card(P1, "Grand Architect", Zone::Battlefield, db),
+            scenario.add_real_card(P1, "Pili-Pala", Zone::Battlefield, db),
+        )),
+    };
     let mut runner = scenario.build();
     engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
 
@@ -2672,12 +2733,17 @@ fn frost_titan_tax_prompt_after_island_bounced() -> Option<TitanTaxBoard> {
 
     pass(&mut runner);
     assert_priority(runner.state(), P1, "reach-guard: P1 receives priority");
-    // Bolt's {R} plus the {2} tax, as in the issue #9282 Frost Titan precedent.
-    fund(
-        &mut runner,
-        P1,
-        &[(ManaType::Red, 1), (ManaType::Colorless, 2)],
-    );
+    match setup {
+        // Bolt's {R} plus the {2} tax, as in the issue #9282 Frost Titan precedent.
+        TaxPayer::PoolFunded => fund(
+            &mut runner,
+            P1,
+            &[(ManaType::Red, 1), (ManaType::Colorless, 2)],
+        ),
+        // Bolt's {R} only: any pool mana left would pay Pili-Pala's {2} and no
+        // window would open.
+        TaxPayer::ArtifactManaWindow => fund(&mut runner, P1, &[(ManaType::Red, 1)]),
+    }
     commit_cast(&mut runner, bolt, Some(TargetRef::Object(titan)));
     for _ in 0..6 {
         if matches!(runner.state().waiting_for, WaitingFor::UnlessPayment { .. }) {
@@ -2690,13 +2756,133 @@ fn frost_titan_tax_prompt_after_island_bounced() -> Option<TitanTaxBoard> {
         "reach-guard: the Titan's tax trigger reached its unless-payment prompt: {:?}",
         runner.state().waiting_for
     );
-    Some(TitanTaxBoard {
-        runner,
-        titan,
-        forests,
-        island_a,
-        island_b,
-    })
+    Some((
+        TitanTaxBoard {
+            runner,
+            titan,
+            forests,
+            island_a,
+            island_b,
+        },
+        artifact_mana,
+    ))
+}
+
+/// Board H7 (also census sub-case D): board H6 with `TaxPayer::ArtifactManaWindow`.
+/// At the unanswered unless-payment prompt P1 activates Pili-Pala's mana ability;
+/// neither P1's empty pool nor a land can pay its {2}, while the untapped Grand
+/// Architect could, so its mana payment window opens (CR 605.3a + CR 117.1d) with
+/// the prompt's retained ability in its unless-payment resume. Returns the board,
+/// Grand Architect and Pili-Pala.
+fn frost_titan_pili_pala_window_after_island_bounced() -> Option<(TitanTaxBoard, ObjectId, ObjectId)>
+{
+    let (mut board, artifact_mana) = titan_tax_board(TaxPayer::ArtifactManaWindow)?;
+    let (architect, pili) = artifact_mana.expect("the artifact-mana board names its sources");
+    let state = board.runner.state();
+    assert!(
+        matches!(state.waiting_for, WaitingFor::UnlessPayment { player, .. } if player == P1),
+        "reach-guard: P1 is asked to pay the tax: {:?}",
+        state.waiting_for
+    );
+    let p1_pool = &state
+        .players
+        .iter()
+        .find(|p| p.id == P1)
+        .expect("P1 exists")
+        .mana_pool;
+    assert_eq!(p1_pool.total(), 0, "reach-guard: P1's pool is empty");
+    assert!(
+        !state.objects[&architect].tapped && !state.objects[&pili].tapped,
+        "reach-guard: Grand Architect and Pili-Pala are untapped"
+    );
+    assert!(
+        !state.battlefield.iter().any(|id| {
+            let object = &state.objects[id];
+            object.controller == P1 && object.card_types.core_types.contains(&CoreType::Land)
+        }),
+        "reach-guard: P1 controls no land"
+    );
+    let ability_index = state.objects[&pili]
+        .abilities
+        .iter()
+        .position(|a| a.kind == AbilityKind::Activated && is_mana_ability(a))
+        .expect("Pili-Pala's mana ability");
+    board
+        .runner
+        .act(GameAction::ActivateAbility {
+            source_id: pili,
+            ability_index,
+        })
+        .expect("P1 activates Pili-Pala at the unless-payment prompt");
+    let state = board.runner.state();
+    assert!(
+        matches!(
+            state.waiting_for,
+            WaitingFor::ManaAbilityManaPayment { player, .. } if player == P1
+        ),
+        "reach-guard: Pili-Pala's {{2}} opens its payment window: {:?}",
+        state.waiting_for
+    );
+    let (pending, pending_effect) = window_parts(state);
+    assert_eq!(pending.player, P1, "reach-guard: P1 activated");
+    assert_eq!(
+        pending.source_id, pili,
+        "reach-guard: Pili-Pala's activation"
+    );
+    assert!(
+        matches!(
+            pending.resume,
+            ManaAbilityResume::UnlessPayment {
+                outer_player: Some(P1),
+                ..
+            }
+        ),
+        "reach-guard: the window resumes P1's unless-payment"
+    );
+    assert_eq!(
+        pending_effect.source_id, board.titan,
+        "reach-guard: the resume retains the Titan's tax ability"
+    );
+    Some((board, architect, pili))
+}
+
+/// The window's activation and the tax ability its unless-payment resume retains.
+fn window_parts(state: &GameState) -> (&PendingManaAbility, &ResolvedAbility) {
+    let WaitingFor::ManaAbilityManaPayment {
+        pending_mana_ability,
+        ..
+    } = &state.waiting_for
+    else {
+        panic!(
+            "expected ManaAbilityManaPayment, got {:?}",
+            state.waiting_for
+        );
+    };
+    let ManaAbilityResume::UnlessPayment { pending_effect, .. } = &pending_mana_ability.resume
+    else {
+        panic!(
+            "expected an UnlessPayment resume, got {:?}",
+            pending_mana_ability.resume
+        );
+    };
+    (pending_mana_ability, pending_effect)
+}
+
+/// The payment vector latched by the ability the window's resume retains.
+fn window_payment(state: &GameState) -> &[ManaSpentSourceSnapshot] {
+    &window_parts(state)
+        .1
+        .trigger_source
+        .as_ref()
+        .expect("the tax trigger latched its source context")
+        .mana_spent_source_snapshots
+}
+
+/// A JSON path under the payment window's retained tax ability.
+fn is_window_path(path: &str) -> bool {
+    path.contains("/waiting_for/")
+        && path.contains("/pending_mana_ability/")
+        && path.contains("/pending_effect/")
 }
 
 /// The payment vector latched by the unless-payment prompt's retained ability.
@@ -2905,5 +3091,183 @@ fn frost_titan_tax_prompt_blanks_hidden_mana_source() {
         !matches!(runner.state().waiting_for, WaitingFor::UnlessPayment { .. }),
         "the authoritative prompt resolved: {:?}",
         runner.state().waiting_for
+    );
+}
+
+/// Test H7: CR 605.3a + CR 117.1d + CR 118.12a + CR 601.2h + CR 400.2: Pili-Pala's
+/// mana payment window, opened at Frost Titan's unless-payment prompt, holds the
+/// activation whose unless-payment resume retains the tax trigger's ability and
+/// so the Titan's payment snapshots. After a paying Island returned to its
+/// owner's hand, the window's own player (P1), a spectator and both client wires
+/// see that Island's entry blanked inside the window, while the visible same-name
+/// Island and the Forests stay named and the public activation and ability spine
+/// is unchanged; the owner and the authoritative state keep the full vector.
+#[test]
+fn frost_titan_pili_pala_payment_window_blanks_hidden_mana_source() {
+    let Some((
+        TitanTaxBoard {
+            mut runner,
+            titan,
+            forests,
+            island_a,
+            island_b,
+        },
+        _architect,
+        pili,
+    )) = frost_titan_pili_pala_window_after_island_bounced()
+    else {
+        return;
+    };
+    let raw = runner.state().clone();
+
+    // Raw reach-guards, before any negative assertion.
+    let titan_payment = &raw.objects[&titan].mana_spent_source_snapshots;
+    let mut expected_sources = forests.clone();
+    expected_sources.extend([island_a, island_b]);
+    expected_sources.sort();
+    let mut paid_sources: Vec<ObjectId> = titan_payment.iter().map(|s| s.source_id).collect();
+    paid_sources.sort();
+    assert_eq!(
+        paid_sources, expected_sources,
+        "reach-guard: the Titan's vector has one entry per paying land"
+    );
+    let (raw_pending, raw_effect) = window_parts(&raw);
+    assert_eq!(raw_pending.source_id, pili, "reach-guard");
+    assert_eq!(raw_effect.source_id, titan, "reach-guard");
+    let raw_window_payment = window_payment(&raw).to_vec();
+    assert_eq!(
+        &raw_window_payment, titan_payment,
+        "reach-guard: the window's resume latched the Titan's payment"
+    );
+    let island_entry = snapshot_of(&raw_window_payment, island_a);
+    assert_eq!(island_entry.lki.name, "Island", "reach-guard");
+    assert!(
+        island_entry.lki.card_types.contains(&CoreType::Land),
+        "reach-guard"
+    );
+    assert_eq!(
+        snapshot_of(&raw_window_payment, island_b).lki.name,
+        "Island"
+    );
+    assert_eq!(raw.objects[&island_a].zone, Zone::Hand, "reach-guard");
+    let raw_json = serde_json::to_value(&raw).expect("raw state serializes");
+    let island_a_id = serde_json::to_value(island_a).expect("id serializes");
+    assert!(
+        payment_paths(&raw_json).iter().any(|(path, items)| {
+            is_window_path(path)
+                && items_from(items, &island_a_id).any(|i| snapshot_name(i) == Some("Island"))
+        }),
+        "reach-guard: a raw window pending_effect path names island_a"
+    );
+
+    for (label, view) in [
+        ("P1", filter_state_for_viewer(&raw, P1)),
+        ("spectator", filter_state_for_unseated_viewer(&raw)),
+    ] {
+        assert_eq!(
+            view.objects[&island_a].name, HIDDEN,
+            "reach-guard ({label}): island_a is hidden"
+        );
+        assert_eq!(
+            view.objects[&island_b].name, "Island",
+            "reach-guard ({label}): the same-name island_b is visible"
+        );
+        assert!(
+            matches!(
+                view.waiting_for,
+                WaitingFor::ManaAbilityManaPayment { player, .. } if player == P1
+            ),
+            "{label}: the public window is kept for its player: {:?}",
+            view.waiting_for
+        );
+        assert_only_hidden_blanked(
+            &raw_window_payment,
+            window_payment(&view),
+            island_a,
+            &format!("{label} ManaAbilityManaPayment resume pending_effect"),
+        );
+        // Public spine: with the payment vector restored, the activation (resume,
+        // retained ability and cost-move resume included) equals the raw one.
+        let mut spine = window_parts(&view).0.clone();
+        let ManaAbilityResume::UnlessPayment { pending_effect, .. } = &mut spine.resume else {
+            panic!("{label}: the window still resumes the unless-payment");
+        };
+        pending_effect
+            .trigger_source
+            .as_mut()
+            .expect("the latched source context is kept")
+            .mana_spent_source_snapshots = raw_window_payment.clone();
+        assert_eq!(
+            &spine, raw_pending,
+            "{label}: only the payment vector changed in the window"
+        );
+    }
+
+    let wire = serde_json::to_value(ClientGameStateRef::wrap(&raw, Some(P1)))
+        .expect("client wire serializes");
+    let wire_paths = payment_paths(&wire);
+    assert!(
+        wire_paths.iter().any(|(path, _)| is_window_path(path)),
+        "reach-guard: the client wire carries the window's payment vector"
+    );
+    for (path, items) in &wire_paths {
+        for item in items_from(items, &island_a_id) {
+            assert_eq!(
+                snapshot_name(item),
+                Some(HIDDEN),
+                "client wire P1: `{path}` still names island_a"
+            );
+        }
+    }
+    for (form_label, form) in hidden_viewer_forms(&raw) {
+        let paths = payment_paths(&form);
+        assert!(
+            paths.iter().any(|(path, items)| is_window_path(path)
+                && items_from(items, &island_a_id).count() == 1),
+            "reach-guard ({form_label}): the window's payment vector keeps island_a's slot"
+        );
+        for (path, items) in &paths {
+            assert!(
+                items_from(items, &island_a_id).all(|i| snapshot_name(i) != Some("Island")),
+                "{form_label}: `{path}` still names island_a"
+            );
+        }
+    }
+
+    let p0 = filter_state_for_viewer(&raw, P0);
+    assert_eq!(p0.objects[&island_a].name, "Island", "owner sees own hand");
+    assert_eq!(
+        window_parts(&p0).0,
+        raw_pending,
+        "the owner keeps the window's activation intact"
+    );
+    assert_eq!(
+        window_payment(&p0),
+        raw_window_payment.as_slice(),
+        "the owner keeps the window's full payment vector"
+    );
+
+    // Authority: projection edits only the clone, and cancelling the window
+    // returns the authoritative prompt with the full ability.
+    assert_eq!(
+        window_payment(runner.state()),
+        raw_window_payment.as_slice(),
+        "authoritative window is untouched by the projections"
+    );
+    runner
+        .act(GameAction::CancelCast)
+        .expect("P1 cancels Pili-Pala's activation");
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::UnlessPayment { player, .. } if player == P1
+        ),
+        "cancelling the window returns to P1's unless-payment prompt: {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(
+        prompt_payment(runner.state()),
+        raw_window_payment.as_slice(),
+        "the authoritative prompt still carries the full payment vector"
     );
 }

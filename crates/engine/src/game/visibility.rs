@@ -3846,8 +3846,8 @@ fn redact_hidden_zone_change_event(event: &mut GameEvent, hidden_ids: &HashSet<O
 /// `RepeatDecision`, `ClashChooseOpponent`, `ChooseFromZoneOpponentChooser`), the
 /// `PendingCast` of `pending_cast` and of casting prompts, the `PendingManaAbility`
 /// `resume`/`cost_move_resume` (and the `trigger_event` of an unless-payment resume) held
-/// by `PayManaAbilityMana`, `PayAmountChoice`, `PayCost`, `CollectEvidenceChoice` and
-/// `ChooseManaColor`, `ManaChoiceContext::ResolvingEffect`, `CollectEvidenceResume::Effect`,
+/// by `PayManaAbilityMana`, `ManaAbilityManaPayment`, `PayAmountChoice`, `PayCost`,
+/// `CollectEvidenceChoice` and `ChooseManaColor`,`ManaChoiceContext::ResolvingEffect`, `CollectEvidenceResume::Effect`,
 /// and the roots `pending_player_scope_sacrifice_choice`,
 /// `pending_player_scope_unless_payment`, `pending_scoped_library_search`,
 /// `pending_library_search_delivery`, `epic_effects` and the prevention rider
@@ -4082,7 +4082,10 @@ fn redact_mana_choice_context_payment(
 /// `WaitingFor` variant that holds a `ResolvedAbility` or `PendingCast` must be added here
 /// by hand: the compiler will not flag it, and the independent JSON key-walk oracle in
 /// `paused_ability_carriers_blank_only_hidden_mana_source_payment_snapshots` only checks
-/// the variants it seeds.
+/// the variants it seeds. A `WaitingFor` field of type `ResolvedAbility`, `PendingCast`,
+/// `PendingManaAbility`, `ManaAbilityResume`, `CostResume`, `CollectEvidenceResume` or
+/// `ManaChoiceContext` must be listed here or in `pending_cast_mut`; the compiler does not
+/// enforce it.
 fn redact_waiting_for_payment(waiting_for: &mut WaitingFor, hidden_ids: &HashSet<ObjectId>) {
     use crate::types::game_state::{CollectEvidenceResume, CostResume};
     // Every casting prompt that holds a `PendingCast` (including a `PayCost` spell resume
@@ -4110,7 +4113,13 @@ fn redact_waiting_for_payment(waiting_for: &mut WaitingFor, hidden_ids: &HashSet
         | WaitingFor::ChooseFromZoneOpponentChooser { ability, .. } => {
             redact_ability_payment(ability, hidden_ids);
         }
+        // CR 605.3a + CR 117.1d: both the hybrid-choice prompt and the payment window hold
+        // the activation (and, through its resume cursors, the outer ability it pays for).
         WaitingFor::PayManaAbilityMana {
+            pending_mana_ability,
+            ..
+        }
+        | WaitingFor::ManaAbilityManaPayment {
             pending_mana_ability,
             ..
         } => redact_pending_mana_ability_payment(pending_mana_ability, hidden_ids),
@@ -6432,8 +6441,9 @@ mod tests {
     /// each carrier is seeded alone on a clone of the fixture. The `PayCost` and
     /// `CostTypeChoice` rows are viewed by an opponent who cannot see the caster's hand,
     /// so the projection rebuilds those prompts from authoritative state; they fail if the
-    /// payment redaction runs before that rebuild. The production witness is
-    /// `frost_titan_tax_prompt_blanks_hidden_mana_source` in
+    /// payment redaction runs before that rebuild. The production witnesses are
+    /// `frost_titan_tax_prompt_blanks_hidden_mana_source` and
+    /// `frost_titan_pili_pala_payment_window_blanks_hidden_mana_source` in
     /// tests/integration/issue_9377_hidden_identity_side_tables.rs.
     #[test]
     fn paused_ability_carriers_blank_only_hidden_mana_source_payment_snapshots() {
@@ -6645,6 +6655,33 @@ mod tests {
                     options: Vec::new(),
                     pending_mana_ability: {
                         let mut inner = dummy_pending_mana_ability(owner, ObjectId(9_901));
+                        inner.resume = ManaAbilityResume::ManaAbilityManaPayment {
+                            pending_mana_ability: mana_ability(),
+                        };
+                        inner
+                    },
+                }),
+            ),
+            (
+                // CR 605.3a + CR 117.1d: the payment window of a mana ability whose own
+                // mana cost is unpaid holds that activation and its resume cursors.
+                "ManaAbilityManaPayment",
+                "/waiting_for/".to_string(),
+                5,
+                prompt(WaitingFor::ManaAbilityManaPayment {
+                    player: owner,
+                    pending_mana_ability: mana_ability(),
+                }),
+            ),
+            (
+                // A payment window opened inside another payment window.
+                "ManaAbilityManaPayment ManaAbilityManaPayment resume",
+                "/waiting_for/".to_string(),
+                5,
+                prompt(WaitingFor::ManaAbilityManaPayment {
+                    player: owner,
+                    pending_mana_ability: {
+                        let mut inner = dummy_pending_mana_ability(owner, ObjectId(9_902));
                         inner.resume = ManaAbilityResume::ManaAbilityManaPayment {
                             pending_mana_ability: mana_ability(),
                         };
