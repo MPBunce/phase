@@ -3847,7 +3847,8 @@ fn redact_hidden_zone_change_event(event: &mut GameEvent, hidden_ids: &HashSet<O
 /// `PendingCast` of `pending_cast` and of casting prompts, the `PendingManaAbility`
 /// `resume`/`cost_move_resume` (and the `trigger_event` of an unless-payment resume) held
 /// by `PayManaAbilityMana`, `ManaAbilityManaPayment`, `PayAmountChoice`, `PayCost`,
-/// `CollectEvidenceChoice` and `ChooseManaColor`,`ManaChoiceContext::ResolvingEffect`, `CollectEvidenceResume::Effect`,
+/// `CollectEvidenceChoice` and `ChooseManaColor`, `ManaChoiceContext::ResolvingEffect`,
+/// `CollectEvidenceResume::Effect`,
 /// and the roots `pending_player_scope_sacrifice_choice`,
 /// `pending_player_scope_unless_payment`, `pending_scoped_library_search`,
 /// `pending_library_search_delivery`, `epic_effects` and the prevention rider
