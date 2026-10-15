@@ -431,14 +431,22 @@ pub(crate) struct ParseContext {
     /// resolution inside trigger effects. Replaces thread-local oracle_target_scope.
     pub relative_player_scope: Option<ControllerRef>,
     /// CR 608.2c + CR 109.4: Transient per-chunk `player_scope` lifted from a
-    /// subject-predicate whose EFFECT carries no player field to stamp the
-    /// subject onto (the fieldless `Effect::Investigate` — Declaration in Stone's
-    /// "That player investigates"). `inject_subject_target` drops such a subject
-    /// silently, so `lower_subject_predicate_ast` records it here instead; the
-    /// effect-chain loop folds it into the chunk's `player_scope` local (→
+    /// subject the clause cannot carry. Two writers:
+    /// - `lower_subject_predicate_ast`, for a subject-predicate whose EFFECT
+    ///   carries no player field (the fieldless `Effect::Investigate` —
+    ///   Declaration in Stone's "That player investigates"), which
+    ///   `inject_subject_target` would otherwise drop silently;
+    /// - `bind_coordinated_player_set`, for the root of a coordinated body with
+    ///   no `TargetOnly` head ("you and that player each …"), whose
+    ///   `ParsedEffectClause` has no `player_scope` field.
+    ///
+    /// The effect-chain loop folds it into the chunk's `player_scope` local (→
     /// `ClauseIr.player_scope` → `AbilityDefinition.player_scope`) so resolution
-    /// fans the effect out to the anchored player rather than the caster. Set and
-    /// consumed within a single chunk parse; never serialized.
+    /// fans the effect out to the scoped players rather than the caster. The
+    /// chunk loop can parse a chunk's clause more than once with the live ctx,
+    /// so a writer that finds an equal value treats it as its own earlier
+    /// parse; the coordinated writer declines to the unbound gap on a different
+    /// value. Set and consumed within a single chunk parse; never serialized.
     pub pending_player_scope: Option<PlayerFilter>,
     /// CR 608.2c + CR 701.16a: Transient per-chunk `repeat_for` lifted from a
     /// fieldless-effect subject-predicate that carries a "for each <filter> …
@@ -810,6 +818,13 @@ pub(crate) struct ParseContext {
     /// `ParentTarget` — it must inherit the population FILTER itself. `None` when
     /// no such producer exists in this chain, or during standalone clause parsing.
     pub chain_prior_mass_population: Option<TargetFilter>,
+    /// CR 608.2c: the object set the NEAREST earlier clause of this chain acts on,
+    /// when that clause's direct operand is the chain's tracked set ("Untap those
+    /// creatures" → `TrackedSet`). A following bare "they" that a continuous
+    /// modification affects names this set, even under an iterated-player frame
+    /// (`subject.rs` · `resolve_they_pronoun`). Seeded per chunk from the chain;
+    /// `None` on every standalone parse.
+    pub chain_prior_object_set: Option<TargetFilter>,
     /// True when the SAME chain's most recent producer was a self-library peek
     /// (look at the top N cards of YOUR library without exiling/moving them).
     /// The bare "from among them" cast anaphor that follows must route to the
@@ -890,16 +905,6 @@ impl ParseContext {
             .any(|t| matches!(t, CoreType::Instant | CoreType::Sorcery))
     }
 
-    /// The nearest player referent a third-person pronoun could name, counting
-    /// the "you may" / "any opponent may" `actor`. Read only by detectors;
-    /// controller phrases bind through `bind_controller_phrase`, which does not
-    /// read `actor`.
-    pub fn third_person_player_controller_ref(&self) -> Option<ControllerRef> {
-        self.relative_player_scope
-            .clone()
-            .or_else(|| self.actor.clone())
-    }
-
     /// The antecedents `bind_controller_phrase` reads for an anaphoric
     /// controller phrase. `actor` is not one: an "any opponent may" actor is the
     /// accepting player only in that player's own frame.
@@ -943,6 +948,32 @@ impl ParseContext {
             return;
         }
         self.diagnostics.push(d);
+    }
+
+    /// CR 608.2c: a context carrying only the caller's player
+    /// antecedents — the fields `player_antecedents` reads for "that player" /
+    /// "they" — for a sub-parse that must bind an anaphoric controller phrase the
+    /// way its caller would, without re-reading object anaphors (`subject`,
+    /// `object_pronoun_ref`, …) or inheriting any other caller state.
+    pub(crate) fn clone_player_antecedents(&self) -> Self {
+        Self {
+            relative_player_scope: self.relative_player_scope.clone(),
+            declared_player_scope: self.declared_player_scope.clone(),
+            prior_player_declaration: self.prior_player_declaration,
+            ..Self::default()
+        }
+    }
+
+    /// Run `f` on `clone_player_antecedents()` and keep its diagnostics: a
+    /// committed sub-parse's `TargetFallback` / `IgnoredRemainder` land on this
+    /// context (deduplicated by `push_diagnostic`); every other write is dropped.
+    pub(crate) fn with_player_antecedents<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
+        let mut scoped = self.clone_player_antecedents();
+        let result = f(&mut scoped);
+        for diagnostic in scoped.diagnostics {
+            self.push_diagnostic(diagnostic);
+        }
+        result
     }
 
     /// CR 105.4: clone this context for a sub-parse whose CONTEXT is DISCARDED —
@@ -990,7 +1021,6 @@ impl ParseContext {
 
     /// Execute `f` with a temporary relative-player scope, restoring the prior
     /// value on return. Replaces thread-local ScopeGuard RAII pattern.
-    #[allow(dead_code)] // Available for nested-scope uses (e.g., nested triggers).
     pub fn with_player_scope<R>(
         &mut self,
         scope: ControllerRef,
@@ -1009,6 +1039,63 @@ mod tests {
     use super::*;
     use crate::parser::oracle_nom::target::{ControllerForm, ControllerTense};
     use crate::types::ability::TypedFilter;
+
+    fn fallback(text: &str) -> OracleDiagnostic {
+        OracleDiagnostic::TargetFallback {
+            context: "parse_target could not classify".into(),
+            text: text.into(),
+            line_index: 0,
+        }
+    }
+
+    /// CR 608.2c: a player-antecedent clone carries exactly the three fields
+    /// `player_antecedents` reads, and none of the caller's object anaphors or
+    /// other state.
+    #[test]
+    fn clone_player_antecedents_keeps_only_the_player_antecedents() {
+        let declared = ControllerRef::DeclaredPlayer {
+            group: ChosenGroupId::declared_player(0),
+        };
+        let source = ParseContext {
+            relative_player_scope: Some(ControllerRef::TargetPlayer),
+            declared_player_scope: Some(declared.clone()),
+            prior_player_declaration: true,
+            subject: Some(TargetFilter::Typed(TypedFilter::creature())),
+            target_chooser: Some(TargetFilter::Any),
+            card_name: Some("Source Card".into()),
+            diagnostics: vec![fallback("caller")],
+            ..ParseContext::default()
+        };
+        let scoped = source.clone_player_antecedents();
+        assert_eq!(
+            scoped.relative_player_scope,
+            Some(ControllerRef::TargetPlayer)
+        );
+        assert_eq!(scoped.declared_player_scope, Some(declared));
+        assert!(scoped.prior_player_declaration);
+        assert_eq!(scoped.subject, None);
+        assert_eq!(scoped.target_chooser, None);
+        assert_eq!(scoped.card_name, None);
+        assert!(scoped.diagnostics.is_empty());
+    }
+
+    /// A committed sub-parse keeps its diagnostics on the caller's context;
+    /// every other write it makes is dropped.
+    #[test]
+    fn with_player_antecedents_merges_only_diagnostics() {
+        let mut ctx = ParseContext {
+            relative_player_scope: Some(ControllerRef::TargetPlayer),
+            ..ParseContext::default()
+        };
+        let seen = ctx.with_player_antecedents(|scoped| {
+            scoped.target_selection_mode = TargetSelectionMode::Random;
+            scoped.push_diagnostic(fallback("sub-parse"));
+            scoped.relative_player_scope.clone()
+        });
+        assert_eq!(seen, Some(ControllerRef::TargetPlayer));
+        assert_eq!(ctx.target_selection_mode, TargetSelectionMode::Chosen);
+        assert_eq!(ctx.diagnostics, vec![fallback("sub-parse")]);
+    }
 
     #[test]
     fn target_fallback_diagnostics_are_idempotent() {

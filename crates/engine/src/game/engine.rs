@@ -16434,6 +16434,9 @@ pub(super) fn begin_pending_trigger_target_selection(
         if !trigger.mode_abilities.is_empty() {
             let player = trigger.controller;
             let source_id = trigger.source_id;
+            // CR 400.7 + CR 603.10a: read the history of the incarnation the
+            // trigger came from, before any `&mut state` borrow.
+            let modal_history_source = trigger.modal_history_source(state);
             let mode_abilities = trigger.mode_abilities.clone();
             let trigger_event = trigger.trigger_event.clone();
             // Clone optional-gate fields before any `&mut state` borrow so the
@@ -16469,7 +16472,8 @@ pub(super) fn begin_pending_trigger_target_selection(
                 &modal,
                 &crate::types::ability::SpellContext::default(),
             );
-            let mut unavailable_modes = compute_unavailable_modes(state, source_id, &modal);
+            let mut unavailable_modes =
+                compute_unavailable_modes(state, modal_history_source, &modal);
             super::ability_utils::filter_modes_by_target_legality(
                 state,
                 source_id,
@@ -17836,6 +17840,35 @@ pub(crate) fn record_crew_resolution(state: &mut GameState, vehicle_id: ObjectId
     }
 }
 
+/// CR 702.122b + CR 702.122c: record that each creature in `paid_creature_ids`
+/// crewed `vehicle_id` — they were tapped to pay its crew cost. Single
+/// authority for writing `GameState::crew_history_this_turn`, called from the
+/// crew announcement right after the tap-for-cost payment. Written at PAYMENT,
+/// not resolution: "crewed by" names the creatures tapped to pay the cost, so a
+/// crew ability that is countered afterwards still leaves the relation. Both
+/// ends are captured at their current incarnation (CR 400.7).
+pub(crate) fn record_crew_payment(
+    state: &mut GameState,
+    vehicle_id: ObjectId,
+    paid_creature_ids: &[ObjectId],
+) {
+    let incarnation = |state: &GameState, id: ObjectId| {
+        state
+            .objects
+            .get(&id)
+            .map(crate::types::identifiers::ObjectIncarnationRef::from_object)
+    };
+    let Some(vehicle) = incarnation(state, vehicle_id) else {
+        return;
+    };
+    let pairs: Vec<_> = paid_creature_ids
+        .iter()
+        .filter_map(|&crewer_id| incarnation(state, crewer_id))
+        .map(|crewer| crate::game::crew_payment::CrewHistoryPair { vehicle, crewer })
+        .collect();
+    state.crew_history_this_turn.extend(pairs);
+}
+
 fn handle_crew_activation(
     state: &mut GameState,
     player: PlayerId,
@@ -18055,6 +18088,8 @@ fn handle_crew_announcement(
     // CR 602.5b: Record this crew activation so an "Activate only once each turn"
     // Vehicle cannot be crewed a second time this turn. Cleared at turn start.
     record_crew_activation(state, vehicle_id);
+    // CR 702.122b + CR 702.122c: the tapped creatures crewed this Vehicle.
+    record_crew_payment(state, vehicle_id, creature_ids);
 
     Ok(push_keyword_action(
         state,
