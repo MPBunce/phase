@@ -4410,6 +4410,7 @@ fn redact_linked_exile_snapshot(member: &mut crate::types::game_state::LinkedExi
         exiled_id: _,
         owner: _,
         mana_value,
+        incarnation: _,
     } = member;
     *mana_value = 0;
 }
@@ -4995,11 +4996,13 @@ mod tests {
                         exiled_id: secret,
                         owner,
                         mana_value: 4,
+                        incarnation: state.objects[&secret].incarnation,
                     },
                     LinkedExileSnapshot {
                         exiled_id: public_member,
                         owner,
                         mana_value: 3,
+                        incarnation: state.objects[&public_member].incarnation,
                     },
                 ],
             }],
@@ -6357,11 +6360,13 @@ mod tests {
                 exiled_id: hidden,
                 owner,
                 mana_value: 4,
+                incarnation: state.objects[&hidden].incarnation,
             },
             LinkedExileSnapshot {
                 exiled_id: public,
                 owner,
                 mana_value: 3,
+                incarnation: state.objects[&public].incarnation,
             },
         ]
     }
@@ -6389,6 +6394,7 @@ mod tests {
                             exiled_id: raw_member.exiled_id,
                             owner: raw_member.owner,
                             mana_value: 0,
+                            incarnation: raw_member.incarnation,
                         },
                         "{label} {path}: the hidden member keeps id and owner, loses its mana value"
                     );
