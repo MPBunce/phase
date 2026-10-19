@@ -5628,16 +5628,22 @@ fn parse_flip_win_quantifier(input: &str) -> OracleResult<'_, ()> {
 /// (the game uses only integers), so this is plain count templating, not the
 /// CR 609.3 "do as much as possible" rule.
 ///
-/// Single authority for "attach trailing for-each multiplier", shared across
-/// quantity-taking verbs whose own quantity parser has already returned the
-/// exact remainder where the multiplier is allowed. The count parser leaves
-/// quantity nouns such as `card`/`cards` in the remainder, so this accepts that
-/// draw-count noun axis before the marker. Returns `None` when the remainder
+/// Also accepts the grouped form `for every <K> <clause>` ("for every three
+/// cards in your graveyard"), which counts only COMPLETE groups of K, so it
+/// lowers to `DivideRounded { inner, divisor: K, rounding: Down }` (floor; CR
+/// 107.1a is the nearest rounding rule). K == 1 is the bare per-each quantity;
+/// K == 0 is rejected.
+///
+/// Called by `counter::parse_counter_for_each_suffix` on the exact remainder its
+/// own quantity parser returned, where the multiplier is allowed. The count
+/// parser leaves quantity nouns such as `card`/`cards` in the remainder, so this
+/// accepts that noun axis before the marker. Returns `None` when the remainder
 /// does not begin with an allowed multiplier shape or the clause does not parse
 /// — never silently substitutes `Fixed(1)`.
 pub(super) fn parse_for_each_multiplier_prefix(text: &str) -> Option<QuantityExpr> {
     let lower = text.to_lowercase();
-    let ((), for_each_clause) = nom_on_lower(text, &lower, |input| {
+    // `None` group size = "for each"; `Some(K)` = "for every K".
+    let (group_size, for_each_clause) = nom_on_lower(text, &lower, |input| {
         let (rest, _) = multispace0.parse(input)?;
         let (rest, _) = opt(terminated(
             alt((
@@ -5647,11 +5653,29 @@ pub(super) fn parse_for_each_multiplier_prefix(text: &str) -> Option<QuantityExp
             multispace1,
         ))
         .parse(rest)?;
-        let (rest, _) = tag("for each ").parse(rest)?;
-        Ok((rest, ()))
+        alt((
+            value(None, tag("for each ")),
+            map(
+                preceded(
+                    tag("for every "),
+                    terminated(nom_primitives::parse_number, multispace1),
+                ),
+                Some,
+            ),
+        ))
+        .parse(rest)
     })?;
     let clause_lower = for_each_clause.to_lowercase();
-    parse_for_each_clause_expr(clause_lower.trim_end_matches('.').trim())
+    let per_each = parse_for_each_clause_expr(clause_lower.trim_end_matches('.').trim())?;
+    match group_size {
+        None | Some(1) => Some(per_each),
+        Some(0) => None,
+        Some(divisor) => Some(QuantityExpr::DivideRounded {
+            inner: Box::new(per_each),
+            divisor,
+            rounding: RoundingMode::Down,
+        }),
+    }
 }
 
 pub(super) fn parse_for_each_opponent_target_fanout_clause(
@@ -17406,6 +17430,45 @@ mod dq_d_player_set_lift_tests {
         assert_eq!(
             body,
             "create a 2/2 black Zombie creature token unless they sacrifice a creature."
+        );
+    }
+
+    /// CR 107.1a: "for every K <clause>" counts complete groups of K (floor).
+    /// Compared against the "for each" sibling so the ref shape is not hardcoded.
+    #[test]
+    fn for_every_k_multiplier_prefix_divides_rounding_down() {
+        use super::parse_for_each_multiplier_prefix;
+        use crate::types::ability::{QuantityExpr, RoundingMode};
+        let per_each = parse_for_each_multiplier_prefix(" for each card in your graveyard")
+            .expect("for-each regression: the existing marker must still parse");
+        let grouped = |k: u32| QuantityExpr::DivideRounded {
+            inner: Box::new(per_each.clone()),
+            divisor: k,
+            rounding: RoundingMode::Down,
+        };
+        assert_eq!(
+            parse_for_each_multiplier_prefix(" for every three cards in your graveyard"),
+            Some(grouped(3))
+        );
+        assert_eq!(
+            parse_for_each_multiplier_prefix(" for every 3 cards in your graveyard."),
+            Some(grouped(3)),
+            "digit form"
+        );
+        assert_eq!(
+            parse_for_each_multiplier_prefix(" for every one card in your graveyard"),
+            Some(per_each.clone()),
+            "K == 1 is the bare per-each quantity"
+        );
+        assert_eq!(
+            parse_for_each_multiplier_prefix(" for every 0 cards in your graveyard"),
+            None,
+            "K == 0 is rejected"
+        );
+        assert_eq!(
+            parse_for_each_multiplier_prefix(" for every three frobnications"),
+            None,
+            "an unparsable noun must not be accepted"
         );
     }
 }
