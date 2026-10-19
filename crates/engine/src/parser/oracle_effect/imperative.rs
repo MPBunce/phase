@@ -16666,8 +16666,8 @@ pub(super) fn counter_placement_is_mass(clause_lower: &str) -> bool {
 /// targeting clause) and `LastCreated` (the tokens the same chain just
 /// created, "each of them" after a token clause, CR 111.1). The
 /// `PutCounterAll` resolver matches its filter against every battlefield
-/// object and cannot bind either anaphor, so a mass-worded ("on each")
-/// placement onto one of these routes to `PutCounter`, whose
+/// object, so it is the wrong effect for a bounded anaphor; a mass-worded
+/// ("on each") placement onto one of these routes to `PutCounter`, whose
 /// `resolve_defined_or_targets` binds the anaphor's object set. Single
 /// authority for both mass-vs-single routing sites (`parse_zone_counter_ast`
 /// here and `try_parse_verb_and_target` in `oracle_effect/mod.rs`).
@@ -16990,8 +16990,9 @@ pub(super) fn parse_zone_counter_ast<'a>(
                 // them" → `ParentTarget` for chosen objects, or `LastCreated`
                 // for the tokens this chain just created) is not a
                 // battlefield-wide type scan. The `PutCounterAll` resolver
-                // matches its filter against every battlefield object and cannot
-                // resolve either anaphor, so route it to `PutCounter`, whose
+                // matches its filter against every battlefield object, which is
+                // the wrong effect for a bounded anaphor, so route it to
+                // `PutCounter`, whose
                 // `resolve_defined_or_targets` binds the anaphor's object set.
                 // Typed mass placements ("on each creature you control") and
                 // tracked-set demonstratives still take the `PutCounterAll` path.
