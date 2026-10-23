@@ -17456,7 +17456,8 @@ mod dq_d_player_set_lift_tests {
         };
         let is_ref = |q: &Option<QuantityExpr>| matches!(q, Some(QuantityExpr::Ref { .. }));
         let is_none = |q: &Option<QuantityExpr>| q.is_none();
-        let rows: &[(&str, &dyn Fn(&Option<QuantityExpr>) -> bool)] = &[
+        type ShapeCheck = dyn Fn(&Option<QuantityExpr>) -> bool;
+        let rows: &[(&str, &ShapeCheck)] = &[
             ("three cards in your graveyard", &is_grouped),
             ("3 cards in your graveyard", &is_grouped),
             ("five counters on it", &is_grouped),
