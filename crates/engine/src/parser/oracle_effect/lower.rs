@@ -5628,22 +5628,23 @@ fn parse_flip_win_quantifier(input: &str) -> OracleResult<'_, ()> {
 /// (the game uses only integers), so this is plain count templating, not the
 /// CR 609.3 "do as much as possible" rule.
 ///
-/// Also accepts the grouped form `for every <K> <clause>` ("for every three
-/// cards in your graveyard"), which counts only COMPLETE groups of K, so it
-/// lowers to `DivideRounded { inner, divisor: K, rounding: Down }` (floor; CR
-/// 107.1a is the nearest rounding rule). K == 1 is the bare per-each quantity;
-/// K == 0 is rejected.
+/// `for every` is only a marker spelling of `for each`. The whole clause after
+/// the marker, numbered or not, goes to `parse_for_each_clause_expr`. That is
+/// the single grouped-quantity authority: "for every three cards in your
+/// graveyard" counts complete groups of three through
+/// `parse_for_each_grouped_clause_expr_with_parser`, which defines the group
+/// size once (N >= 2) and builds the floor `DivideRounded` (CR 107.1a). This
+/// seam does not parse group sizes itself.
 ///
 /// Called by `counter::parse_counter_for_each_suffix` on the exact remainder its
 /// own quantity parser returned, where the multiplier is allowed. The count
 /// parser leaves quantity nouns such as `card`/`cards` in the remainder, so this
 /// accepts that noun axis before the marker. Returns `None` when the remainder
-/// does not begin with an allowed multiplier shape or the clause does not parse
-/// — never silently substitutes `Fixed(1)`.
+/// does not begin with an allowed marker or the clause does not parse — never
+/// silently substitutes `Fixed(1)`.
 pub(super) fn parse_for_each_multiplier_prefix(text: &str) -> Option<QuantityExpr> {
     let lower = text.to_lowercase();
-    // `None` group size = "for each"; `Some(K)` = "for every K".
-    let (group_size, for_each_clause) = nom_on_lower(text, &lower, |input| {
+    let ((), for_each_clause) = nom_on_lower(text, &lower, |input| {
         let (rest, _) = multispace0.parse(input)?;
         let (rest, _) = opt(terminated(
             alt((
@@ -5653,29 +5654,10 @@ pub(super) fn parse_for_each_multiplier_prefix(text: &str) -> Option<QuantityExp
             multispace1,
         ))
         .parse(rest)?;
-        alt((
-            value(None, tag("for each ")),
-            map(
-                preceded(
-                    tag("for every "),
-                    terminated(nom_primitives::parse_number, multispace1),
-                ),
-                Some,
-            ),
-        ))
-        .parse(rest)
+        value((), alt((tag("for each "), tag("for every ")))).parse(rest)
     })?;
     let clause_lower = for_each_clause.to_lowercase();
-    let per_each = parse_for_each_clause_expr(clause_lower.trim_end_matches('.').trim())?;
-    match group_size {
-        None | Some(1) => Some(per_each),
-        Some(0) => None,
-        Some(divisor) => Some(QuantityExpr::DivideRounded {
-            inner: Box::new(per_each),
-            divisor,
-            rounding: RoundingMode::Down,
-        }),
-    }
+    parse_for_each_clause_expr(clause_lower.trim_end_matches('.').trim())
 }
 
 pub(super) fn parse_for_each_opponent_target_fanout_clause(
@@ -17433,42 +17415,79 @@ mod dq_d_player_set_lift_tests {
         );
     }
 
-    /// CR 107.1a: "for every K <clause>" counts complete groups of K (floor).
-    /// Compared against the "for each" sibling so the ref shape is not hardcoded.
+    /// CR 107.1a: "for every" is a marker spelling of "for each"; numbered
+    /// clauses lower through the shared grouped-quantity authority
+    /// (`parse_for_each_clause_expr`), never through group-size handling at the
+    /// suffix seam. Every row compares the two markers, and accepting rows are
+    /// pinned to `Some(..)` so `None == None` cannot pass.
     #[test]
-    fn for_every_k_multiplier_prefix_divides_rounding_down() {
+    fn for_every_marker_agrees_with_for_each_through_shared_grouped_authority() {
         use super::parse_for_each_multiplier_prefix;
+        use crate::parser::oracle_quantity::parse_for_each_clause_expr;
         use crate::types::ability::{QuantityExpr, RoundingMode};
+
+        // Reach guard: the grouped form is the floor over the same inner the
+        // ungrouped grammar emits, and equals the authority called directly.
         let per_each = parse_for_each_multiplier_prefix(" for each card in your graveyard")
             .expect("for-each regression: the existing marker must still parse");
-        let grouped = |k: u32| QuantityExpr::DivideRounded {
-            inner: Box::new(per_each.clone()),
-            divisor: k,
-            rounding: RoundingMode::Down,
+        let grouped = parse_for_each_multiplier_prefix(" for every three cards in your graveyard");
+        assert_eq!(
+            grouped,
+            Some(QuantityExpr::DivideRounded {
+                inner: Box::new(per_each),
+                divisor: 3,
+                rounding: RoundingMode::Down,
+            })
+        );
+        assert_eq!(
+            grouped,
+            parse_for_each_clause_expr("three cards in your graveyard"),
+            "the suffix seam must defer to the shared authority"
+        );
+
+        let is_grouped = |q: &Option<QuantityExpr>| {
+            matches!(
+                q,
+                Some(QuantityExpr::DivideRounded {
+                    rounding: RoundingMode::Down,
+                    ..
+                })
+            )
         };
+        let is_ref = |q: &Option<QuantityExpr>| matches!(q, Some(QuantityExpr::Ref { .. }));
+        let is_none = |q: &Option<QuantityExpr>| q.is_none();
+        let rows: &[(&str, &dyn Fn(&Option<QuantityExpr>) -> bool)] = &[
+            ("three cards in your graveyard", &is_grouped),
+            ("3 cards in your graveyard", &is_grouped),
+            ("five counters on it", &is_grouped),
+            ("five counters removed this way", &is_grouped),
+            ("two other creatures you control", &is_grouped),
+            ("three cards in your graveyard.", &is_grouped),
+            ("creature you control", &is_ref),
+            ("one card in your graveyard", &is_none),
+            ("0 cards in your graveyard", &is_none),
+            ("zero cards in your graveyard", &is_none),
+            (
+                "three cards in your graveyard and each land you control",
+                &is_none,
+            ),
+            ("three frobnications", &is_none),
+        ];
+        for (clause, expected) in rows {
+            let every = parse_for_each_multiplier_prefix(&format!(" for every {clause}"));
+            let each = parse_for_each_multiplier_prefix(&format!(" for each {clause}"));
+            assert_eq!(every, each, "markers disagree on {clause:?}");
+            assert!(
+                expected(&every),
+                "unexpected shape for {clause:?}: {every:?}"
+            );
+        }
+
+        // Marker boundary: other spellings and a bare marker decline.
         assert_eq!(
-            parse_for_each_multiplier_prefix(" for every three cards in your graveyard"),
-            Some(grouped(3))
+            parse_for_each_multiplier_prefix(" for any three cards in your graveyard"),
+            None
         );
-        assert_eq!(
-            parse_for_each_multiplier_prefix(" for every 3 cards in your graveyard."),
-            Some(grouped(3)),
-            "digit form"
-        );
-        assert_eq!(
-            parse_for_each_multiplier_prefix(" for every one card in your graveyard"),
-            Some(per_each.clone()),
-            "K == 1 is the bare per-each quantity"
-        );
-        assert_eq!(
-            parse_for_each_multiplier_prefix(" for every 0 cards in your graveyard"),
-            None,
-            "K == 0 is rejected"
-        );
-        assert_eq!(
-            parse_for_each_multiplier_prefix(" for every three frobnications"),
-            None,
-            "an unparsable noun must not be accepted"
-        );
+        assert_eq!(parse_for_each_multiplier_prefix(" for every"), None);
     }
 }
